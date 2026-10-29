@@ -124,6 +124,14 @@
         "category": "Agent Inspector"
       }
     ],
+    "keybindings": [
+      {
+        "command": "agentDiff.archiveCurrentStep",
+        "key": "ctrl+pagedown",
+        "mac": "cmd+pagedown",
+        "when": "true"
+      }
+    ],
     "menus": {
       "view/title": [
         {

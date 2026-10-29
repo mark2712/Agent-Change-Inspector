@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { ExtensionConfig, FileChangeInfo } from './types';
 import { ChangeDetector } from './detector';
 import { DiffPresenter } from './diffPresenter';
@@ -182,11 +184,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   // КОМАНДЫ РАСШИРЕНИЯ
 
-  // 1. Фиксация шага по кнопке вручную
+  // 1. Фиксация шага по кнопке, хоткею (Ctrl+PageDown) или команде
   const archiveCurrentCmd = vscode.commands.registerCommand(
     'agentDiff.archiveCurrentStep',
-    async () => {
-      const cp = await historyManager.archiveCurrentTurn();
+    async (customTitle?: string) => {
+      const cp = await historyManager.archiveCurrentTurn(
+        typeof customTitle === 'string' ? customTitle : undefined
+      );
       if (cp) {
         decoProvider.refresh();
         decorationManager.refreshAllVisibleEditors();
@@ -386,6 +390,44 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  // 15. Поддержка файла-триггера завершения шага: .agent-inspector/.step-trigger
+  const triggerPattern = new vscode.RelativePattern(
+    workspaceFolder || vscode.Uri.file(workspaceRoot),
+    '.agent-inspector/.step-trigger*'
+  );
+  const triggerWatcher = vscode.workspace.createFileSystemWatcher(triggerPattern);
+
+  const handleStepTrigger = async (uri: vscode.Uri) => {
+    try {
+      let customTitle: string | undefined;
+      if (fs.existsSync(uri.fsPath)) {
+        try {
+          const content = await fs.promises.readFile(uri.fsPath, 'utf-8');
+          if (content && content.trim().length > 0) {
+            customTitle = content.trim();
+          }
+        } catch {
+          // Игнорируем
+        }
+        await fs.promises.unlink(uri.fsPath).catch(() => {});
+      }
+
+      const cp = await historyManager.archiveCurrentTurn(customTitle);
+      if (cp) {
+        decoProvider.refresh();
+        decorationManager.refreshAllVisibleEditors();
+        updateBadges();
+        statusBar.updateChanges([]);
+        vscode.window.showInformationMessage(`Шаг зафиксирован через триггер: ${cp.title}`);
+      }
+    } catch (err) {
+      console.error('[AgentInspector] Ошибка при обработке step-trigger:', err);
+    }
+  };
+
+  triggerWatcher.onDidCreate(handleStepTrigger);
+  triggerWatcher.onDidChange(handleStepTrigger);
+
   context.subscriptions.push(
     ignoreManager,
     historyManager,
@@ -395,6 +437,7 @@ export function activate(context: vscode.ExtensionContext) {
     decoSub,
     detector,
     statusBar,
+    triggerWatcher,
     archiveCurrentCmd,
     openDiffCmd,
     openFileCmd,

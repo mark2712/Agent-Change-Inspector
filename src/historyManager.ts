@@ -77,18 +77,6 @@ export class HistoryManager implements vscode.Disposable {
     );
 
     this._onDidChange.fire();
-
-    // Опциональный авто-архив (если включен в настройках)
-    const config = this.getConfig();
-    if (config.autoArchive) {
-      if (this.cooldownTimer) {
-        clearTimeout(this.cooldownTimer);
-      }
-      const cooldownMs = Math.max(3000, (config.autoArchiveSeconds || 8) * 1000);
-      this.cooldownTimer = setTimeout(() => {
-        this.archiveCurrentTurn();
-      }, cooldownMs);
-    }
   }
 
   /**
@@ -144,9 +132,9 @@ export class HistoryManager implements vscode.Disposable {
   }
 
   /**
-   * Зафиксировать текущий шаг (вручную по кнопке или авто)
+   * Зафиксировать текущий шаг (вручную по кнопке, хоткею или файлу-триггеру)
    */
-  async archiveCurrentTurn(): Promise<TurnCheckpoint | null> {
+  async archiveCurrentTurn(customTitle?: string): Promise<TurnCheckpoint | null> {
     const files = this.getCurrentChanges();
     if (files.length === 0) {
       return null;
@@ -160,10 +148,15 @@ export class HistoryManager implements vscode.Disposable {
     });
     const fileWord = getNoun(files.length, 'файл', 'файла', 'файлов');
 
+    const cleanCustom = customTitle?.trim();
+    const title = cleanCustom && cleanCustom.length > 0
+      ? `Шаг №${this.turnCounter}: ${cleanCustom}`
+      : `Шаг №${this.turnCounter} (${timeStr}) — ${files.length} ${fileWord}`;
+
     const checkpoint: TurnCheckpoint = {
       id: this.activeFolderName,
       stepNumber: this.turnCounter++,
-      title: `Шаг №${this.turnCounter - 1} (${timeStr}) — ${files.length} ${fileWord}`,
+      title,
       timestamp: Date.now(),
       folderName: this.activeFolderName,
       files,
