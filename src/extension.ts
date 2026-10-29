@@ -91,16 +91,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   const treeProvider = new AgentChangesTreeProvider(historyManager, config.treeViewMode);
 
-  // Провайдер бейджей статуса (M, A, D) в проводнике
+  // Провайдер бейджей статуса (M, A, D) в проводнике (только для активных правок)
   const decoProvider = new AgentFileDecorationProvider((uri) =>
-    treeProvider.getChangeByUri(uri)
+    treeProvider.getActiveChangeByUri(uri)
   );
   const decoSub = vscode.window.registerFileDecorationProvider(decoProvider);
 
-  // Менеджер полосок на полях (Gutter), фона строк и маркеров скроллбара
+  // Менеджер полосок на полях (Gutter), фона строк и маркеров скроллбара (только для активных правок)
   const decorationManager = new DecorationManager(
     context.extensionUri,
-    (uri) => treeProvider.getChangeByUri(uri)
+    (uri) => treeProvider.getActiveChangeByUri(uri)
   );
   decorationManager.setEnabled(config.enableHighlight);
 

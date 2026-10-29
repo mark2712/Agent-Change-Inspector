@@ -230,8 +230,12 @@ export class AgentChangesTreeProvider implements vscode.TreeDataProvider<TreeNod
     return element;
   }
 
+  getActiveChangeByUri(uri: vscode.Uri): FileChangeInfo | undefined {
+    return this.historyManager.getCurrentChanges().find((c) => c.fsPath === uri.fsPath);
+  }
+
   getChangeByUri(uri: vscode.Uri): FileChangeInfo | undefined {
-    const current = this.historyManager.getCurrentChanges().find((c) => c.fsPath === uri.fsPath);
+    const current = this.getActiveChangeByUri(uri);
     if (current) {
       return current;
     }

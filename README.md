@@ -198,7 +198,7 @@ npm run build
 npx @vscode/vsce package --no-dependencies
 
 # 4. Установка в ваш Visual Studio Code
-code --install-extension agent-change-inspector-0.6.0.vsix --force
+code --install-extension agent-change-inspector-1.0.0.vsix --force
 ```
 
 Для вступления обновлений в силу в уже открытом окне VS Code:
