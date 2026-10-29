@@ -1,8 +1,8 @@
 {
   "name": "agent-change-inspector",
   "displayName": "Agent Change Inspector (AI Diff Guard)",
-  "description": "Автоматически открывает файлы при изменении агентом/ИИ, показывает точные строки изменений, проводник правок и защищает проект",
-  "version": "0.3.2",
+  "description": "Автоматически открывает файлы при изменении агентом/ИИ, показывает точные строки изменений, проводник правок, историю шагов и защищает проект",
+  "version": "0.4.0",
   "publisher": "antigravity-tools",
   "repository": {
     "type": "git",
@@ -52,6 +52,12 @@
         "category": "Agent Inspector"
       },
       {
+        "command": "agentDiff.archiveCurrentStep",
+        "title": "Зафиксировать шаг в архив",
+        "icon": "$(archive)",
+        "category": "Agent Inspector"
+      },
+      {
         "command": "agentDiff.refreshTree",
         "title": "Обновить список",
         "icon": "$(refresh)",
@@ -64,14 +70,20 @@
         "category": "Agent Inspector"
       },
       {
+        "command": "agentDiff.clearHistory",
+        "title": "Очистить архив шагов",
+        "icon": "$(trash)",
+        "category": "Agent Inspector"
+      },
+      {
         "command": "agentDiff.clearAllChanges",
-        "title": "Очистить список изменений",
+        "title": "Очистить текущие изменения",
         "icon": "$(clear-all)",
         "category": "Agent Inspector"
       },
       {
         "command": "agentDiff.revertAllChanges",
-        "title": "Откатить ВСЕ недавние изменения",
+        "title": "Откатить текущие изменения",
         "icon": "$(discard)",
         "category": "Agent Inspector"
       },
@@ -94,6 +106,12 @@
         "category": "Agent Inspector"
       },
       {
+        "command": "agentDiff.revertTurn",
+        "title": "Откатить этот шаг",
+        "icon": "$(discard)",
+        "category": "Agent Inspector"
+      },
+      {
         "command": "agentDiff.openSettings",
         "title": "Настройки Agent Inspector",
         "icon": "$(gear)",
@@ -103,7 +121,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "agentDiff.openSettings",
+          "command": "agentDiff.archiveCurrentStep",
           "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
           "group": "navigation@0"
         },
@@ -118,17 +136,22 @@
           "group": "navigation@2"
         },
         {
-          "command": "agentDiff.revertAllChanges",
+          "command": "agentDiff.clearHistory",
           "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
           "group": "navigation@3"
         },
         {
-          "command": "agentDiff.clearAllChanges",
+          "command": "agentDiff.openSettings",
           "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
           "group": "navigation@4"
         }
       ],
       "view/item/context": [
+        {
+          "command": "agentDiff.revertTurn",
+          "when": "(view == agent-inspector-files || view == agent-inspector-files-explorer) && viewItem == agentTurnItem",
+          "group": "inline@1"
+        },
         {
           "command": "agentDiff.openDiff",
           "when": "(view == agent-inspector-files || view == agent-inspector-files-explorer) && (viewItem == agentFile || viewItem == agentFileDeleted)",
@@ -182,10 +205,20 @@
           "default": true,
           "description": "Автоматически перемещать курсор и скроллить к первой измененной строке"
         },
-        "agentDiff.showNotification": {
+        "agentDiff.autoArchive": {
           "type": "boolean",
           "default": true,
-          "description": "Показывать всплывающее уведомление с номерами строк и объемом изменений"
+          "description": "Автоматически архивировать шаг промпта в историю после паузы в правках"
+        },
+        "agentDiff.autoArchiveSeconds": {
+          "type": "number",
+          "default": 8,
+          "description": "Количество секунд бездействия до авто-архивирования шага"
+        },
+        "agentDiff.showNotification": {
+          "type": "boolean",
+          "default": false,
+          "description": "Показывать всплывающее уведомление"
         },
         "agentDiff.treeViewMode": {
           "type": "string",
@@ -222,6 +255,7 @@
             "**/build/**",
             "**/.next/**",
             "**/.agents/**",
+            "**/.agent-inspector/**",
             "**/tmp/**"
           ],
           "description": "Игнорируемые пути при отслеживании изменений"
@@ -248,6 +282,6 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "ignore": "^7.0.14"
+    "ignore": "^7.0.5"
   }
 }

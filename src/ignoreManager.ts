@@ -16,6 +16,7 @@ const DEFAULT_IGNORE_PATTERNS = [
   'tmp/',
   '*.log',
   '.agentignore',
+  '.agent-inspector/',
 ];
 
 /**

@@ -18,6 +18,18 @@ export interface FileChangeInfo {
 }
 
 /**
+ * Чекпоинт (шаг выполнения промпта) в истории
+ */
+export interface TurnCheckpoint {
+  id: string;
+  stepNumber: number;
+  title: string;
+  timestamp: number;
+  files: FileChangeInfo[];
+  snapshotDir?: string;
+}
+
+/**
  * Конфигурация расширения
  */
 export interface ExtensionConfig {
@@ -28,6 +40,8 @@ export interface ExtensionConfig {
   jumpToFirstChange: boolean;
   showNotification: boolean;
   treeViewMode: 'tree' | 'flat';
+  autoArchive: boolean;
+  autoArchiveSeconds: number;
   protectedPatterns: string[];
   ignorePatterns: string[];
   debounceMs: number;

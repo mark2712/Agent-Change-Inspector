@@ -6,9 +6,11 @@ import { StatusBarManager } from './statusBar';
 import {
   AgentChangesTreeProvider,
   AgentTreeItem,
+  TurnTreeItem,
   AgentFileDecorationProvider,
 } from './treeProvider';
 import { IgnoreManager } from './ignoreManager';
+import { HistoryManager } from './historyManager';
 import { SettingsWebviewPanel } from './settingsWebview';
 import { revertGitFile } from './gitHelper';
 
@@ -25,6 +27,8 @@ function getExtensionConfig(): ExtensionConfig {
     jumpToFirstChange: cfg.get<boolean>('jumpToFirstChange', true),
     showNotification: cfg.get<boolean>('showNotification', false),
     treeViewMode: cfg.get<'tree' | 'flat'>('treeViewMode', 'tree'),
+    autoArchive: cfg.get<boolean>('autoArchive', true),
+    autoArchiveSeconds: cfg.get<number>('autoArchiveSeconds', 8),
     protectedPatterns: cfg.get<string[]>('protectedPatterns', [
       '**/*.lock',
       '**/package-lock.json',
@@ -39,6 +43,7 @@ function getExtensionConfig(): ExtensionConfig {
       '**/build/**',
       '**/.next/**',
       '**/.agents/**',
+      '**/.agent-inspector/**',
       '**/tmp/**',
     ]),
     debounceMs: cfg.get<number>('debounceMs', 400),
@@ -47,9 +52,13 @@ function getExtensionConfig(): ExtensionConfig {
 
 export function activate(context: vscode.Context) {
   const config = getExtensionConfig();
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
+
   const ignoreManager = new IgnoreManager();
+  const historyManager = new HistoryManager(getExtensionConfig, workspaceRoot);
   const presenter = new DiffPresenter(getExtensionConfig);
-  const treeProvider = new AgentChangesTreeProvider(config.treeViewMode);
+  const treeProvider = new AgentChangesTreeProvider(historyManager, config.treeViewMode);
 
   // Провайдер подсветки удаленных файлов красным цветом
   const decoProvider = new AgentFileDecorationProvider((uri) =>
@@ -70,12 +79,12 @@ export function activate(context: vscode.Context) {
   });
 
   const updateBadges = () => {
-    const count = treeProvider.getAllChanges().length;
+    const currentCount = historyManager.getCurrentChanges().length;
     const badge =
-      count > 0
+      currentCount > 0
         ? {
-            value: count,
-            tooltip: `${count} измененных файлов`,
+            value: currentCount,
+            tooltip: `${currentCount} активных изменений`,
           }
         : undefined;
     treeViewContainer.badge = badge;
@@ -92,34 +101,34 @@ export function activate(context: vscode.Context) {
     }
   );
 
-  // Детектор внешних изменений с поддержкой отмены (Ctrl+Z) и удалений
+  // Детектор внешних изменений с поддержкой авто-архивирования и отмены (Ctrl+Z)
   const detector = new ChangeDetector(
     getExtensionConfig,
     ignoreManager,
-    (fsPath) => treeProvider.getChangeByUri(vscode.Uri.file(fsPath)) !== undefined,
+    (fsPath) => historyManager.isCurrentFileTracked(fsPath),
     async (changed, reverted) => {
       // 1. Убираем файлы, где изменения были отменены (например, Ctrl+Z)
       for (const fsPath of reverted) {
-        treeProvider.removeChange(fsPath);
+        historyManager.removeCurrentFile(fsPath);
       }
 
-      // 2. Добавляем или обновляем измененные файлы
+      // 2. Записываем активные изменения
       if (changed.length > 0) {
-        treeProvider.addOrUpdateChanges(changed);
+        await historyManager.recordChanges(changed);
         await presenter.presentChanges(changed);
       }
 
       // 3. Обновляем визуальные индикаторы
       decoProvider.refresh();
       updateBadges();
-      statusBar.updateChanges(treeProvider.getAllChanges());
+      statusBar.updateChanges(historyManager.getCurrentChanges());
     }
   );
 
   // Вспомогательная функция для извлечения информации о файле из аргументов команды
-  const extractChangeInfo = (item?: AgentTreeItem | FileChangeInfo): FileChangeInfo | undefined => {
+  const extractChangeInfo = (item?: any): FileChangeInfo | undefined => {
     if (!item) {
-      const all = treeProvider.getAllChanges();
+      const all = historyManager.getCurrentChanges();
       return all.length > 0 ? all[all.length - 1] : undefined;
     }
     if ('changeInfo' in item) {
@@ -136,9 +145,59 @@ export function activate(context: vscode.Context) {
     SettingsWebviewPanel.createOrShow(context.extensionUri, ignoreManager);
   });
 
+  const archiveCurrentCmd = vscode.commands.registerCommand(
+    'agentDiff.archiveCurrentStep',
+    () => {
+      const cp = historyManager.archiveCurrentTurn();
+      if (cp) {
+        updateBadges();
+        statusBar.updateChanges([]);
+        vscode.window.showInformationMessage(`Шаг перенесен в архив: ${cp.title}`);
+      } else {
+        vscode.window.showInformationMessage('Нет активных изменений для архивации.');
+      }
+    }
+  );
+
+  const revertTurnCmd = vscode.commands.registerCommand(
+    'agentDiff.revertTurn',
+    async (item?: TurnTreeItem) => {
+      if (!item || !item.checkpoint) {
+        return;
+      }
+      const answer = await vscode.window.showWarningMessage(
+        `Откатить все файлы шага "${item.checkpoint.title}"?`,
+        'Да, откатить',
+        'Отмена'
+      );
+      if (answer === 'Да, откатить') {
+        const ok = await historyManager.revertTurn(item.checkpoint.id);
+        if (ok) {
+          decoProvider.refresh();
+          updateBadges();
+          vscode.window.showInformationMessage(`Шаг "${item.checkpoint.title}" успешно откачен.`);
+        } else {
+          vscode.window.showErrorMessage('Ошибка при откате шага.');
+        }
+      }
+    }
+  );
+
+  const clearHistoryCmd = vscode.commands.registerCommand('agentDiff.clearHistory', async () => {
+    const answer = await vscode.window.showWarningMessage(
+      'Очистить всю историю завершенных шагов (архив)?',
+      'Да, очистить',
+      'Отмена'
+    );
+    if (answer === 'Да, очистить') {
+      historyManager.clearHistory();
+      vscode.window.showInformationMessage('История шагов очищена.');
+    }
+  });
+
   const openDiffCmd = vscode.commands.registerCommand(
     'agentDiff.openDiff',
-    async (item?: AgentTreeItem | FileChangeInfo) => {
+    async (item?: any) => {
       const change = extractChangeInfo(item);
       if (change) {
         await presenter.openDiffTab(change);
@@ -148,7 +207,7 @@ export function activate(context: vscode.Context) {
 
   const openFileCmd = vscode.commands.registerCommand(
     'agentDiff.openFile',
-    async (item?: AgentTreeItem | FileChangeInfo) => {
+    async (item?: any) => {
       const change = extractChangeInfo(item);
       if (change) {
         await presenter.openDocumentTab(change);
@@ -163,15 +222,13 @@ export function activate(context: vscode.Context) {
       if (!change) {
         return;
       }
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
 
       const ok = await revertGitFile(change.fsPath, workspaceRoot);
       if (ok) {
-        treeProvider.removeChange(change.fsPath);
+        historyManager.removeCurrentFile(change.fsPath);
         decoProvider.refresh();
         updateBadges();
-        statusBar.updateChanges(treeProvider.getAllChanges());
+        statusBar.updateChanges(historyManager.getCurrentChanges());
         vscode.window.showInformationMessage(
           `Файл ${change.relativeName} откачен / восстановлен.`
         );
@@ -182,12 +239,10 @@ export function activate(context: vscode.Context) {
   );
 
   const refreshTreeCmd = vscode.commands.registerCommand('agentDiff.refreshTree', async () => {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const root = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
-    await treeProvider.reconcileWithGit(root);
+    await treeProvider.reconcileWithGit(workspaceRoot);
     decoProvider.refresh();
     updateBadges();
-    statusBar.updateChanges(treeProvider.getAllChanges());
+    statusBar.updateChanges(historyManager.getCurrentChanges());
   });
 
   const toggleTreeModeCmd = vscode.commands.registerCommand('agentDiff.toggleTreeMode', () => {
@@ -198,39 +253,36 @@ export function activate(context: vscode.Context) {
   });
 
   const clearAllCmd = vscode.commands.registerCommand('agentDiff.clearAllChanges', () => {
-    treeProvider.clear();
+    historyManager.clearCurrent();
     decoProvider.refresh();
     updateBadges();
     statusBar.updateChanges([]);
-    vscode.window.showInformationMessage('Список измененных файлов очищен.');
+    vscode.window.showInformationMessage('Текущие изменения очищены.');
   });
 
   const revertAllCmd = vscode.commands.registerCommand('agentDiff.revertAllChanges', async () => {
-    const all = treeProvider.getAllChanges();
-    if (all.length === 0) {
-      vscode.window.showInformationMessage('Нет файлов для отката.');
+    const current = historyManager.getCurrentChanges();
+    if (current.length === 0) {
+      vscode.window.showInformationMessage('Нет активных изменений для отката.');
       return;
     }
 
     const answer = await vscode.window.showWarningMessage(
-      `Откатить ВСЕ (${all.length}) измененные / удаленные файлы?`,
+      `Откатить ВСЕ (${current.length}) текущие измененные / удаленные файлы?`,
       'Да, откатить все',
       'Отмена'
     );
 
     if (answer === 'Да, откатить все') {
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
-
-      for (const change of all) {
+      for (const change of current) {
         await revertGitFile(change.fsPath, workspaceRoot);
       }
 
-      treeProvider.clear();
+      historyManager.clearCurrent();
       decoProvider.refresh();
       updateBadges();
       statusBar.updateChanges([]);
-      vscode.window.showInformationMessage('Все измененные файлы успешно откатаны.');
+      vscode.window.showInformationMessage('Все текущие изменения успешно откатаны.');
     }
   });
 
@@ -258,11 +310,15 @@ export function activate(context: vscode.Context) {
 
   context.subscriptions.push(
     ignoreManager,
+    historyManager,
     treeViewContainer,
     treeViewExplorer,
     decoSub,
     detector,
     statusBar,
+    archiveCurrentCmd,
+    revertTurnCmd,
+    clearHistoryCmd,
     openSettingsCmd,
     openDiffCmd,
     openFileCmd,

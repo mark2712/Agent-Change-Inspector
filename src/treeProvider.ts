@@ -1,10 +1,70 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { FileChangeInfo } from './types';
+import { FileChangeInfo, TurnCheckpoint } from './types';
+import { HistoryManager } from './historyManager';
 import { getGitDiffSummary } from './gitHelper';
 
+export type TreeNode = SectionTreeItem | TurnTreeItem | AgentTreeItem | PlaceholderTreeItem;
+
 /**
- * Элемент дерева измененных файлов
+ * Заголовок секции: "Текущий промпт" или "История шагов"
+ */
+export class SectionTreeItem extends vscode.TreeItem {
+  constructor(
+    public readonly sectionType: 'current' | 'history',
+    public readonly count: number
+  ) {
+    super(
+      sectionType === 'current' ? 'ТЕКУЩИЙ ПРОМПТ' : 'ИСТОРИЯ ШАГОВ',
+      vscode.TreeItemCollapsibleState.Expanded
+    );
+
+    if (sectionType === 'current') {
+      this.contextValue = 'agentSectionCurrent';
+      this.description = count > 0 ? `(Активные правки: ${count})` : '(Ожидание правок)';
+      this.iconPath = new vscode.ThemeIcon(
+        count > 0 ? 'zap' : 'circle-outline',
+        count > 0 ? new vscode.ThemeColor('charts.yellow') : undefined
+      );
+    } else {
+      this.contextValue = 'agentSectionHistory';
+      this.description = `(Архив: ${count})`;
+      this.iconPath = new vscode.ThemeIcon(
+        'history',
+        new vscode.ThemeColor('charts.blue')
+      );
+    }
+  }
+}
+
+/**
+ * Элемент архивного шага (Промпта)
+ */
+export class TurnTreeItem extends vscode.TreeItem {
+  constructor(public readonly checkpoint: TurnCheckpoint) {
+    super(checkpoint.title, vscode.TreeItemCollapsibleState.Collapsed);
+
+    this.contextValue = 'agentTurnItem';
+    this.iconPath = new vscode.ThemeIcon('milestone');
+    this.tooltip = `Шаг №${checkpoint.stepNumber}\nВремя: ${new Date(
+      checkpoint.timestamp
+    ).toLocaleTimeString()}\nФайлов: ${checkpoint.files.length}`;
+  }
+}
+
+/**
+ * Пустой плейсхолдер
+ */
+export class PlaceholderTreeItem extends vscode.TreeItem {
+  constructor(message: string) {
+    super(message, vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon('dash');
+    this.contextValue = 'agentPlaceholder';
+  }
+}
+
+/**
+ * Элемент файла
  */
 export class AgentTreeItem extends vscode.TreeItem {
   constructor(
@@ -12,7 +72,8 @@ export class AgentTreeItem extends vscode.TreeItem {
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
     public readonly changeInfo?: FileChangeInfo,
     public readonly folderRelativePath?: string,
-    public readonly isFolder: boolean = false
+    public readonly isFolder: boolean = false,
+    public readonly isArchiveFile: boolean = false
   ) {
     super(label, collapsibleState);
 
@@ -25,7 +86,6 @@ export class AgentTreeItem extends vscode.TreeItem {
       this.resourceUri = changeInfo.uri;
 
       if (changeInfo.isDeleted) {
-        // Ярко-красная иконка и пометка удаления
         this.iconPath = new vscode.ThemeIcon(
           'trash',
           new vscode.ThemeColor('gitDecoration.deletedResourceForeground')
@@ -39,7 +99,6 @@ export class AgentTreeItem extends vscode.TreeItem {
         ).toLocaleTimeString()}`;
       }
 
-      // Команда по клику на элемент: открывает файл/дифф
       this.command = {
         command: 'agentDiff.openDiff',
         title: 'Открыть Diff',
@@ -50,7 +109,7 @@ export class AgentTreeItem extends vscode.TreeItem {
 }
 
 /**
- * Провайдер подсветки цветов файлов (красный цвет для удаленных)
+ * Декоратор подсветки удаленных файлов красным
  */
 export class AgentFileDecorationProvider implements vscode.FileDecorationProvider {
   private _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
@@ -77,19 +136,20 @@ export class AgentFileDecorationProvider implements vscode.FileDecorationProvide
 }
 
 /**
- * Провайдер дерева измененных файлов (Проводник правок ИИ)
+ * Провайдер дерева правок с разбивкой на ТЕКУЩИЙ ПРОМПТ и ИСТОРИЮ ШАГОВ
  */
-export class AgentChangesTreeProvider implements vscode.TreeDataProvider<AgentTreeItem> {
-  private _onDidChangeTreeData: vscode.EventEmitter<AgentTreeItem | undefined | void> =
-    new vscode.EventEmitter<AgentTreeItem | undefined | void>();
-  readonly onDidChangeTreeData: vscode.Event<AgentTreeItem | undefined | void> =
-    this._onDidChangeTreeData.event;
+export class AgentChangesTreeProvider implements vscode.TreeDataProvider<TreeNode> {
+  private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private changesMap = new Map<string, FileChangeInfo>();
   private isTreeMode = true;
 
-  constructor(private readonly treeViewMode: 'tree' | 'flat' = 'tree') {
+  constructor(
+    private readonly historyManager: HistoryManager,
+    treeViewMode: 'tree' | 'flat' = 'tree'
+  ) {
     this.isTreeMode = treeViewMode === 'tree';
+    this.historyManager.onDidChange(() => this.refresh());
   }
 
   setTreeMode(mode: 'tree' | 'flat') {
@@ -107,143 +167,141 @@ export class AgentChangesTreeProvider implements vscode.TreeDataProvider<AgentTr
     this._onDidChangeTreeData.fire();
   }
 
-  addOrUpdateChanges(changes: FileChangeInfo[]): void {
-    for (const change of changes) {
-      this.changesMap.set(change.fsPath, change);
-    }
-    this.refresh();
-  }
-
-  removeChange(fsPath: string): void {
-    if (this.changesMap.delete(fsPath)) {
-      this.refresh();
-    }
-  }
-
-  clear(): void {
-    this.changesMap.clear();
-    this.refresh();
-  }
-
-  /**
-   * Сверка всех текущих записей дерева с реальным состоянием Git
-   * Удаляет файлы, где изменения были отменены (например, через Ctrl+Z или git restore)
-   */
-  async reconcileWithGit(workspaceRoot: string): Promise<boolean> {
-    let hasChanged = false;
-    for (const [fsPath, info] of Array.from(this.changesMap.entries())) {
-      const gitInfo = await getGitDiffSummary(fsPath, workspaceRoot);
-
-      if (!gitInfo.hasChanges) {
-        // Изменений больше нет (отмена удаления или правки)
-        this.changesMap.delete(fsPath);
-        hasChanged = true;
-      } else if (
-        info.isDeleted !== gitInfo.isDeleted ||
-        info.isUntracked !== gitInfo.isUntracked ||
-        info.changedLinesSummary !== gitInfo.summaryText
-      ) {
-        // Состояние обновилось (например, файл пересоздан)
-        this.changesMap.set(fsPath, {
-          ...info,
-          isDeleted: gitInfo.isDeleted,
-          isUntracked: gitInfo.isUntracked,
-          changedLinesSummary: gitInfo.summaryText,
-          firstChangedLine: gitInfo.firstChangedLine,
-          addedLines: gitInfo.addedLines,
-          deletedLines: gitInfo.deletedLines,
-        });
-        hasChanged = true;
-      }
-    }
-
-    if (hasChanged) {
-      this.refresh();
-    }
-
-    return hasChanged;
-  }
-
-  getAllChanges(): FileChangeInfo[] {
-    return Array.from(this.changesMap.values());
-  }
-
-  getChangeByUri(uri: vscode.Uri): FileChangeInfo | undefined {
-    return this.changesMap.get(uri.fsPath);
-  }
-
-  getTreeItem(element: AgentTreeItem): vscode.TreeItem {
+  getTreeItem(element: TreeNode): vscode.TreeItem {
     return element;
   }
 
-  async getChildren(element?: AgentTreeItem): Promise<AgentTreeItem[]> {
-    const allChanges = Array.from(this.changesMap.values());
+  getChangeByUri(uri: vscode.Uri): FileChangeInfo | undefined {
+    const current = this.historyManager.getCurrentChanges().find((c) => c.fsPath === uri.fsPath);
+    if (current) {
+      return current;
+    }
+    for (const h of this.historyManager.getHistory()) {
+      const found = h.files.find((c) => c.fsPath === uri.fsPath);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
 
-    if (allChanges.length === 0) {
+  /**
+   * Сверка текущих активных правок с Git
+   */
+  async reconcileWithGit(workspaceRoot: string): Promise<void> {
+    const current = this.historyManager.getCurrentChanges();
+    for (const item of current) {
+      const gitInfo = await getGitDiffSummary(item.fsPath, workspaceRoot);
+      if (!gitInfo.hasChanges) {
+        this.historyManager.removeCurrentFile(item.fsPath);
+      }
+    }
+    this.refresh();
+  }
+
+  async getChildren(element?: TreeNode): Promise<TreeNode[]> {
+    // 1. Корневой уровень: 2 секции
+    if (!element) {
+      const current = this.historyManager.getCurrentChanges();
+      const history = this.historyManager.getHistory();
+
+      return [
+        new SectionTreeItem('current', current.length),
+        new SectionTreeItem('history', history.length),
+      ];
+    }
+
+    // 2. Внутри секции "ТЕКУЩИЙ ПРОМПТ"
+    if (element instanceof SectionTreeItem && element.sectionType === 'current') {
+      const current = this.historyManager.getCurrentChanges();
+      if (current.length === 0) {
+        return [new PlaceholderTreeItem('(Нет активных правок)')];
+      }
+      return this.renderFileList(current);
+    }
+
+    // 3. Внутри секции "ИСТОРИЯ ШАГОВ"
+    if (element instanceof SectionTreeItem && element.sectionType === 'history') {
+      const history = this.historyManager.getHistory();
+      if (history.length === 0) {
+        return [new PlaceholderTreeItem('(История пуста)')];
+      }
+      return history.map((cp) => new TurnTreeItem(cp));
+    }
+
+    // 4. Внутри архивного шага (TurnTreeItem)
+    if (element instanceof TurnTreeItem) {
+      return this.renderFileList(element.checkpoint.files, true);
+    }
+
+    // 5. Внутри подпапки (в режиме дерева)
+    if (element instanceof AgentTreeItem && element.isFolder) {
+      // Подпапка
       return [];
     }
 
-    // Режим 1: Плоский список (Flat List)
+    return [];
+  }
+
+  private renderFileList(files: FileChangeInfo[], isArchive: boolean = false): TreeNode[] {
     if (!this.isTreeMode) {
-      return allChanges.map(
-        (c) => new AgentTreeItem(path.basename(c.fsPath), vscode.TreeItemCollapsibleState.None, c)
+      return files.map(
+        (c) =>
+          new AgentTreeItem(
+            path.basename(c.fsPath),
+            vscode.TreeItemCollapsibleState.None,
+            c,
+            undefined,
+            false,
+            isArchive
+          )
       );
     }
 
-    // Режим 2: Иерархическое дерево (как в Проводнике)
-    const currentFolder = element ? element.folderRelativePath : '';
-
+    // Древовидная группировка
     const folders = new Map<string, string>();
-    const files: FileChangeInfo[] = [];
+    const rootFiles: FileChangeInfo[] = [];
 
-    for (const change of allChanges) {
-      const rel = change.relativeName.replace(/\\/g, '/');
-
-      if (!currentFolder) {
-        // Корневой уровень
-        const slashIdx = rel.indexOf('/');
-        if (slashIdx === -1) {
-          files.push(change);
-        } else {
-          const topDir = rel.substring(0, slashIdx);
-          folders.set(topDir, topDir);
-        }
+    for (const f of files) {
+      const rel = f.relativeName.replace(/\\/g, '/');
+      const slash = rel.indexOf('/');
+      if (slash === -1) {
+        rootFiles.push(f);
       } else {
-        // Внутри папки currentFolder
-        const prefix = currentFolder + '/';
-        if (rel.startsWith(prefix)) {
-          const remaining = rel.substring(prefix.length);
-          const slashIdx = remaining.indexOf('/');
-          if (slashIdx === -1) {
-            files.push(change);
-          } else {
-            const nextDir = remaining.substring(0, slashIdx);
-            const fullNextDir = `${currentFolder}/${nextDir}`;
-            folders.set(fullNextDir, nextDir);
-          }
-        }
+        const topDir = rel.substring(0, slash);
+        folders.set(topDir, topDir);
       }
     }
 
-    const items: AgentTreeItem[] = [];
+    const items: TreeNode[] = [];
 
-    // Добавляем папки
-    for (const [fullPath, dirName] of folders.entries()) {
-      items.push(
-        new AgentTreeItem(
-          dirName,
-          vscode.TreeItemCollapsibleState.Expanded,
-          undefined,
-          fullPath,
-          true
-        )
-      );
+    for (const [topDir] of folders.entries()) {
+      // Для простоты и легкости вложенные файлы выводятся с относительным префиксом
+      const inDir = files.filter((f) => f.relativeName.replace(/\\/g, '/').startsWith(topDir + '/'));
+      for (const f of inDir) {
+        items.push(
+          new AgentTreeItem(
+            f.relativeName,
+            vscode.TreeItemCollapsibleState.None,
+            f,
+            undefined,
+            false,
+            isArchive
+          )
+        );
+      }
     }
 
-    // Добавляем файлы
-    for (const file of files) {
+    for (const f of rootFiles) {
       items.push(
-        new AgentTreeItem(path.basename(file.fsPath), vscode.TreeItemCollapsibleState.None, file)
+        new AgentTreeItem(
+          path.basename(f.fsPath),
+          vscode.TreeItemCollapsibleState.None,
+          f,
+          undefined,
+          false,
+          isArchive
+        )
       );
     }
 
