@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { FileChangeInfo } from './types';
+import { getGitDiffSummary } from './gitHelper';
 
 /**
  * Элемент дерева измененных файлов
@@ -114,13 +115,53 @@ export class AgentChangesTreeProvider implements vscode.TreeDataProvider<AgentTr
   }
 
   removeChange(fsPath: string): void {
-    this.changesMap.delete(fsPath);
-    this.refresh();
+    if (this.changesMap.delete(fsPath)) {
+      this.refresh();
+    }
   }
 
   clear(): void {
     this.changesMap.clear();
     this.refresh();
+  }
+
+  /**
+   * Сверка всех текущих записей дерева с реальным состоянием Git
+   * Удаляет файлы, где изменения были отменены (например, через Ctrl+Z или git restore)
+   */
+  async reconcileWithGit(workspaceRoot: string): Promise<boolean> {
+    let hasChanged = false;
+    for (const [fsPath, info] of Array.from(this.changesMap.entries())) {
+      const gitInfo = await getGitDiffSummary(fsPath, workspaceRoot);
+
+      if (!gitInfo.hasChanges) {
+        // Изменений больше нет (отмена удаления или правки)
+        this.changesMap.delete(fsPath);
+        hasChanged = true;
+      } else if (
+        info.isDeleted !== gitInfo.isDeleted ||
+        info.isUntracked !== gitInfo.isUntracked ||
+        info.changedLinesSummary !== gitInfo.summaryText
+      ) {
+        // Состояние обновилось (например, файл пересоздан)
+        this.changesMap.set(fsPath, {
+          ...info,
+          isDeleted: gitInfo.isDeleted,
+          isUntracked: gitInfo.isUntracked,
+          changedLinesSummary: gitInfo.summaryText,
+          firstChangedLine: gitInfo.firstChangedLine,
+          addedLines: gitInfo.addedLines,
+          deletedLines: gitInfo.deletedLines,
+        });
+        hasChanged = true;
+      }
+    }
+
+    if (hasChanged) {
+      this.refresh();
+    }
+
+    return hasChanged;
   }
 
   getAllChanges(): FileChangeInfo[] {

@@ -51,7 +51,8 @@ export class ChangeDetector implements vscode.Disposable {
   constructor(
     private readonly getConfig: () => ExtensionConfig,
     private readonly ignoreManager: IgnoreManager,
-    private readonly onExternalChanges: (changes: FileChangeInfo[]) => void
+    private readonly isFileTracked: (fsPath: string) => boolean,
+    private readonly onBatchProcessed: (changed: FileChangeInfo[], revertedPaths: string[]) => void
   ) {
     this.registerListeners();
   }
@@ -64,7 +65,7 @@ export class ChangeDetector implements vscode.Disposable {
       })
     );
 
-    // 2. Создаем системный наблюдатель за файлами проекта
+    // 2. Создаем системный наблюдатель за файлами проекта (включая удаление)
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
 
     this.disposables.push(
@@ -110,9 +111,12 @@ export class ChangeDetector implements vscode.Disposable {
       return;
     }
 
-    // 3. Проверяем, не было ли это сохранением самого пользователя за последние 1.5 сек
+    // 3. Проверяем, не было ли это сохранением самого пользователя
+    // Если файл УЖЕ в нашем дереве правок — пропускаем проверку, чтобы зафиксировать Ctrl+Z или отмену!
+    const isAlreadyTracked = this.isFileTracked(fsPath);
     const lastUserSave = this.userSaveTimes.get(fsPath);
-    if (lastUserSave && Date.now() - lastUserSave < 1500) {
+
+    if (!isAlreadyTracked && lastUserSave && Date.now() - lastUserSave < 1500) {
       return;
     }
 
@@ -141,7 +145,8 @@ export class ChangeDetector implements vscode.Disposable {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
 
-    const results: FileChangeInfo[] = [];
+    const changed: FileChangeInfo[] = [];
+    const reverted: string[] = [];
 
     for (const [fsPath, uri] of entries) {
       const isProtected = matchesPattern(fsPath, config.protectedPatterns);
@@ -153,7 +158,7 @@ export class ChangeDetector implements vscode.Disposable {
       const gitInfo = await getGitDiffSummary(fsPath, workspaceRoot);
 
       if (gitInfo.hasChanges) {
-        results.push({
+        changed.push({
           uri,
           fsPath,
           relativeName,
@@ -166,11 +171,14 @@ export class ChangeDetector implements vscode.Disposable {
           isUntracked: gitInfo.isUntracked,
           isDeleted: gitInfo.isDeleted,
         });
+      } else {
+        // Файл вернулся к исходному состоянию (нет изменений в Git: например, Ctrl+Z или git restore)
+        reverted.push(fsPath);
       }
     }
 
-    if (results.length > 0) {
-      this.onExternalChanges(results);
+    if (changed.length > 0 || reverted.length > 0) {
+      this.onBatchProcessed(changed, reverted);
     }
   }
 

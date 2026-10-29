@@ -92,16 +92,29 @@ export function activate(context: vscode.Context) {
     }
   );
 
-  // Детектор внешних изменений с учетом .agentignore
-  const detector = new ChangeDetector(getExtensionConfig, ignoreManager, async (changes) => {
-    if (changes.length > 0) {
-      treeProvider.addOrUpdateChanges(changes);
+  // Детектор внешних изменений с поддержкой отмены (Ctrl+Z) и удалений
+  const detector = new ChangeDetector(
+    getExtensionConfig,
+    ignoreManager,
+    (fsPath) => treeProvider.getChangeByUri(vscode.Uri.file(fsPath)) !== undefined,
+    async (changed, reverted) => {
+      // 1. Убираем файлы, где изменения были отменены (например, Ctrl+Z)
+      for (const fsPath of reverted) {
+        treeProvider.removeChange(fsPath);
+      }
+
+      // 2. Добавляем или обновляем измененные файлы
+      if (changed.length > 0) {
+        treeProvider.addOrUpdateChanges(changed);
+        await presenter.presentChanges(changed);
+      }
+
+      // 3. Обновляем визуальные индикаторы
       decoProvider.refresh();
       updateBadges();
-      statusBar.updateChanges(changes);
-      await presenter.presentChanges(changes);
+      statusBar.updateChanges(treeProvider.getAllChanges());
     }
-  });
+  );
 
   // Вспомогательная функция для извлечения информации о файле из аргументов команды
   const extractChangeInfo = (item?: AgentTreeItem | FileChangeInfo): FileChangeInfo | undefined => {
@@ -158,6 +171,7 @@ export function activate(context: vscode.Context) {
         treeProvider.removeChange(change.fsPath);
         decoProvider.refresh();
         updateBadges();
+        statusBar.updateChanges(treeProvider.getAllChanges());
         vscode.window.showInformationMessage(
           `Файл ${change.relativeName} откачен / восстановлен.`
         );
@@ -167,9 +181,13 @@ export function activate(context: vscode.Context) {
     }
   );
 
-  const refreshTreeCmd = vscode.commands.registerCommand('agentDiff.refreshTree', () => {
-    treeProvider.refresh();
+  const refreshTreeCmd = vscode.commands.registerCommand('agentDiff.refreshTree', async () => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const root = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
+    await treeProvider.reconcileWithGit(root);
     decoProvider.refresh();
+    updateBadges();
+    statusBar.updateChanges(treeProvider.getAllChanges());
   });
 
   const toggleTreeModeCmd = vscode.commands.registerCommand('agentDiff.toggleTreeMode', () => {
@@ -183,6 +201,7 @@ export function activate(context: vscode.Context) {
     treeProvider.clear();
     decoProvider.refresh();
     updateBadges();
+    statusBar.updateChanges([]);
     vscode.window.showInformationMessage('Список измененных файлов очищен.');
   });
 
@@ -210,6 +229,7 @@ export function activate(context: vscode.Context) {
       treeProvider.clear();
       decoProvider.refresh();
       updateBadges();
+      statusBar.updateChanges([]);
       vscode.window.showInformationMessage('Все измененные файлы успешно откатаны.');
     }
   });
