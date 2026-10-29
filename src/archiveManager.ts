@@ -55,19 +55,10 @@ export class ArchiveManager {
    * Сохранить исходную копию файла (ДО правок) в папку шага
    */
   async archivePreChangeFile(folderName: string, change: FileChangeInfo): Promise<void> {
-    // Не архивируем новые untracked файлы (их не существовало до этого шага)
-    if (change.isUntracked && !change.isDeleted) {
-      return;
-    }
-
     try {
       const relPath = change.relativeName.replace(/\\/g, '/');
       const targetPath = path.join(this.baseDir, folderName, relPath);
       const targetDir = path.dirname(targetPath);
-
-      if (!fs.existsSync(targetDir)) {
-        await fs.promises.mkdir(targetDir, { recursive: true });
-      }
 
       // Если в рамках этого шага исходник уже сохранен — не перезаписываем
       if (fs.existsSync(targetPath)) {
@@ -78,10 +69,18 @@ export class ArchiveManager {
       const headBuffer = await getFileFromGitHead(change.fsPath, this.workspaceRoot);
 
       if (headBuffer) {
+        if (!fs.existsSync(targetDir)) {
+          await fs.promises.mkdir(targetDir, { recursive: true });
+        }
         await fs.promises.writeFile(targetPath, headBuffer);
-      } else if (fs.existsSync(change.fsPath)) {
-        // Запасной вариант: прямое копирование с диска
+        console.log(`[AgentInspector] Снимок сохранен из Git HEAD: ${targetPath}`);
+      } else if (!change.isDeleted && fs.existsSync(change.fsPath)) {
+        // Запасной вариант для untracked файлов: сохраняем копию с диска
+        if (!fs.existsSync(targetDir)) {
+          await fs.promises.mkdir(targetDir, { recursive: true });
+        }
         await fs.promises.copyFile(change.fsPath, targetPath);
+        console.log(`[AgentInspector] Снимок сохранен с диска: ${targetPath}`);
       }
     } catch (err) {
       console.error(`Ошибка архивации файла ${change.fsPath}:`, err);
@@ -126,22 +125,41 @@ export class ArchiveManager {
   }
 
   /**
-   * Очистить старые папки архива (оставляем последние N шагов)
+   * Очистить старые папки архива (оставляем последние maxKeepCount снимков на диске)
    */
-  async cleanupOldFolders(activeFolderNames: string[]): Promise<void> {
+  async cleanupOldFolders(activeFolderNames: string[], maxKeepCount = 50): Promise<void> {
     if (!fs.existsSync(this.baseDir)) {
       return;
     }
 
     try {
       const entries = await fs.promises.readdir(this.baseDir);
+      const snapshotDirs: string[] = [];
+
       for (const entry of entries) {
-        if (entry === '.gitignore' || activeFolderNames.includes(entry)) {
+        if (entry === '.gitignore') {
           continue;
         }
         const fullPath = path.join(this.baseDir, entry);
         const stat = await fs.promises.stat(fullPath);
         if (stat.isDirectory()) {
+          snapshotDirs.push(entry);
+        }
+      }
+
+      // Сортируем по хронологии (имена папок YYYY_MM_DD_HH_mm_ss)
+      snapshotDirs.sort();
+
+      // Если папок больше лимита, удаляем только самые старые
+      if (snapshotDirs.length > maxKeepCount) {
+        const toDeleteCount = snapshotDirs.length - maxKeepCount;
+        for (let i = 0; i < toDeleteCount; i++) {
+          const folderToDelete = snapshotDirs[i];
+          // Не удаляем, если шаг еще активен в интерфейсе
+          if (activeFolderNames.includes(folderToDelete)) {
+            continue;
+          }
+          const fullPath = path.join(this.baseDir, folderToDelete);
           await fs.promises.rm(fullPath, { recursive: true, force: true });
         }
       }
