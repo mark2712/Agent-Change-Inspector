@@ -11,6 +11,7 @@ import {
 } from './treeProvider';
 import { IgnoreManager } from './ignoreManager';
 import { HistoryManager } from './historyManager';
+import { DecorationManager } from './decorationManager';
 import { SettingsWebviewPanel } from './settingsWebview';
 import { revertGitFile } from './gitHelper';
 
@@ -25,6 +26,7 @@ function getExtensionConfig(): ExtensionConfig {
     openMode: cfg.get<'diff' | 'document'>('openMode', 'diff'),
     openLocation: cfg.get<'beside' | 'active'>('openLocation', 'active'),
     jumpToFirstChange: cfg.get<boolean>('jumpToFirstChange', true),
+    enableHighlight: cfg.get<boolean>('enableHighlight', true),
     showNotification: cfg.get<boolean>('showNotification', false),
     treeViewMode: cfg.get<'tree' | 'flat'>('treeViewMode', 'tree'),
     autoArchive: cfg.get<boolean>('autoArchive', true),
@@ -56,16 +58,19 @@ export function activate(context: vscode.Context) {
   const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
 
   const ignoreManager = new IgnoreManager();
-  const storageDir = context.storageUri ? context.storageUri.fsPath : undefined;
-  const historyManager = new HistoryManager(getExtensionConfig, workspaceRoot, storageDir);
+  const historyManager = new HistoryManager(getExtensionConfig, workspaceRoot);
   const presenter = new DiffPresenter(getExtensionConfig);
   const treeProvider = new AgentChangesTreeProvider(historyManager, config.treeViewMode);
 
-  // Провайдер подсветки удаленных файлов красным цветом
+  // Провайдер подсветки удаленных файлов красным цветом в проводнике
   const decoProvider = new AgentFileDecorationProvider((uri) =>
     treeProvider.getChangeByUri(uri)
   );
   const decoSub = vscode.window.registerFileDecorationProvider(decoProvider);
+
+  // Менеджер мягкой подсветки измененных строк в самом редакторе (Decorations + Gutter)
+  const decorationManager = new DecorationManager((uri) => treeProvider.getChangeByUri(uri));
+  decorationManager.setEnabled(config.enableHighlight);
 
   // 1. Панель в отдельном контейнере (для выноса вправо в Secondary Side Bar)
   const treeViewContainer = vscode.window.createTreeView('agent-inspector-files', {
@@ -119,8 +124,9 @@ export function activate(context: vscode.Context) {
         await presenter.presentChanges(changed);
       }
 
-      // 3. Обновляем визуальные индикаторы
+      // 3. Обновляем визуальные индикаторы и подсветку строк в коде
       decoProvider.refresh();
+      decorationManager.refreshAllVisibleEditors();
       updateBadges();
       statusBar.updateChanges(historyManager.getCurrentChanges());
     }
@@ -146,11 +152,22 @@ export function activate(context: vscode.Context) {
     SettingsWebviewPanel.createOrShow(context.extensionUri, ignoreManager);
   });
 
+  const toggleHighlightCmd = vscode.commands.registerCommand(
+    'agentDiff.toggleHighlight',
+    () => {
+      const isNowOn = decorationManager.toggle();
+      vscode.window.showInformationMessage(
+        `Подсветка строк в коде: ${isNowOn ? 'Включена' : 'Выключена'}`
+      );
+    }
+  );
+
   const archiveCurrentCmd = vscode.commands.registerCommand(
     'agentDiff.archiveCurrentStep',
     () => {
       const cp = historyManager.archiveCurrentTurn();
       if (cp) {
+        decorationManager.refreshAllVisibleEditors();
         updateBadges();
         statusBar.updateChanges([]);
         vscode.window.showInformationMessage(`Шаг перенесен в архив: ${cp.title}`);
@@ -167,7 +184,7 @@ export function activate(context: vscode.Context) {
         return;
       }
       const answer = await vscode.window.showWarningMessage(
-        `Откатить все файлы шага "${item.checkpoint.title}"?`,
+        `Откатить все файлы шага "${item.checkpoint.title}" (из .agent-inspector)?`,
         'Да, откатить',
         'Отмена'
       );
@@ -175,6 +192,7 @@ export function activate(context: vscode.Context) {
         const ok = await historyManager.revertTurn(item.checkpoint.id);
         if (ok) {
           decoProvider.refresh();
+          decorationManager.refreshAllVisibleEditors();
           updateBadges();
           vscode.window.showInformationMessage(`Шаг "${item.checkpoint.title}" успешно откачен.`);
         } else {
@@ -228,6 +246,7 @@ export function activate(context: vscode.Context) {
       if (ok) {
         historyManager.removeCurrentFile(change.fsPath);
         decoProvider.refresh();
+        decorationManager.refreshAllVisibleEditors();
         updateBadges();
         statusBar.updateChanges(historyManager.getCurrentChanges());
         vscode.window.showInformationMessage(
@@ -242,6 +261,7 @@ export function activate(context: vscode.Context) {
   const refreshTreeCmd = vscode.commands.registerCommand('agentDiff.refreshTree', async () => {
     await treeProvider.reconcileWithGit(workspaceRoot);
     decoProvider.refresh();
+    decorationManager.refreshAllVisibleEditors();
     updateBadges();
     statusBar.updateChanges(historyManager.getCurrentChanges());
   });
@@ -256,6 +276,7 @@ export function activate(context: vscode.Context) {
   const clearAllCmd = vscode.commands.registerCommand('agentDiff.clearAllChanges', () => {
     historyManager.clearCurrent();
     decoProvider.refresh();
+    decorationManager.refreshAllVisibleEditors();
     updateBadges();
     statusBar.updateChanges([]);
     vscode.window.showInformationMessage('Текущие изменения очищены.');
@@ -281,6 +302,7 @@ export function activate(context: vscode.Context) {
 
       historyManager.clearCurrent();
       decoProvider.refresh();
+      decorationManager.refreshAllVisibleEditors();
       updateBadges();
       statusBar.updateChanges([]);
       vscode.window.showInformationMessage('Все текущие изменения успешно откатаны.');
@@ -305,6 +327,7 @@ export function activate(context: vscode.Context) {
     if (e.affectsConfiguration('agentDiff')) {
       const updatedConfig = getExtensionConfig();
       treeProvider.setTreeMode(updatedConfig.treeViewMode);
+      decorationManager.setEnabled(updatedConfig.enableHighlight);
       statusBar.updateStatus();
     }
   });
@@ -312,11 +335,13 @@ export function activate(context: vscode.Context) {
   context.subscriptions.push(
     ignoreManager,
     historyManager,
+    decorationManager,
     treeViewContainer,
     treeViewExplorer,
     decoSub,
     detector,
     statusBar,
+    toggleHighlightCmd,
     archiveCurrentCmd,
     revertTurnCmd,
     clearHistoryCmd,

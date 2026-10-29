@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import { DiffHunkRange } from './types';
 
 const execAsync = promisify(exec);
 
@@ -25,6 +26,7 @@ export interface GitDiffSummary {
   addedLines: number;
   deletedLines: number;
   summaryText: string;
+  hunks: DiffHunkRange[];
 }
 
 /**
@@ -43,7 +45,28 @@ export async function isTrackedInGit(filePath: string, workspaceRoot: string): P
 }
 
 /**
- * Получить сводку изменений для конкретного файла через git diff -U0 с защитой от больших/бинарных файлов
+ * Получить содержимое файла из Git HEAD (до изменений агента)
+ */
+export async function getFileFromGitHead(
+  filePath: string,
+  workspaceRoot: string
+): Promise<Buffer | null> {
+  try {
+    const relPath = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+    const { stdout } = await execAsync(`git show "HEAD:${relPath}"`, {
+      cwd: workspaceRoot,
+      timeout: 3000,
+      encoding: 'buffer',
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Получить сводку изменений и точные диапазоны строк через git diff -U0
  */
 export async function getGitDiffSummary(
   filePath: string,
@@ -65,6 +88,7 @@ export async function getGitDiffSummary(
             addedLines: 0,
             deletedLines: 0,
             summaryText: `Большой файл (${sizeMb} МБ)`,
+            hunks: [],
           };
         }
       } catch {
@@ -81,6 +105,7 @@ export async function getGitDiffSummary(
           addedLines: 0,
           deletedLines: 0,
           summaryText: `Бинарный файл (${ext})`,
+          hunks: [],
         };
       }
     }
@@ -111,19 +136,37 @@ export async function getGitDiffSummary(
         addedLines: 0,
         deletedLines: 0,
         summaryText: 'Файл удален',
+        hunks: [],
       };
     }
 
     // Если это новый неотслеживаемый файл (untracked)
     if (statusTrim.startsWith('??')) {
+      let lineCount = 1;
+      try {
+        if (fileExistsOnDisk) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          lineCount = Math.max(1, content.split(/\r?\n/).length);
+        }
+      } catch {
+        // Игнорируем
+      }
+
       return {
         hasChanges: true,
         isUntracked: true,
         isDeleted: false,
         firstChangedLine: 1,
-        addedLines: 0,
+        addedLines: lineCount,
         deletedLines: 0,
         summaryText: 'Новый (untracked) файл',
+        hunks: [
+          {
+            startLine: 1,
+            endLine: lineCount,
+            isAddition: true,
+          },
+        ],
       };
     }
 
@@ -146,6 +189,7 @@ export async function getGitDiffSummary(
           addedLines: 0,
           deletedLines: 0,
           summaryText: 'Изменен в Git',
+          hunks: [],
         };
       }
 
@@ -156,6 +200,7 @@ export async function getGitDiffSummary(
         addedLines: 0,
         deletedLines: 0,
         summaryText: 'Без изменений в Git',
+        hunks: [],
       };
     }
 
@@ -167,6 +212,7 @@ export async function getGitDiffSummary(
     let totalAdded = 0;
     let totalDeleted = 0;
     const lineRanges: string[] = [];
+    const hunks: DiffHunkRange[] = [];
 
     while ((match = hunkRegex.exec(stdout)) !== null) {
       const oldStart = parseInt(match[1], 10);
@@ -184,8 +230,18 @@ export async function getGitDiffSummary(
       if (newCount > 0) {
         const endLine = newStart + newCount - 1;
         lineRanges.push(newStart === endLine ? `стр. ${newStart}` : `стр. ${newStart}-${endLine}`);
+        hunks.push({
+          startLine: newStart,
+          endLine,
+          isAddition: true,
+        });
       } else if (oldCount > 0) {
         lineRanges.push(`удалено возле стр. ${newStart}`);
+        hunks.push({
+          startLine: Math.max(1, newStart),
+          endLine: Math.max(1, newStart),
+          isAddition: false,
+        });
       }
     }
 
@@ -200,6 +256,7 @@ export async function getGitDiffSummary(
       addedLines: totalAdded,
       deletedLines: totalDeleted,
       summaryText,
+      hunks,
     };
   } catch (error) {
     const fileExists = fs.existsSync(filePath);
@@ -211,6 +268,7 @@ export async function getGitDiffSummary(
       addedLines: 0,
       deletedLines: 0,
       summaryText: !fileExists ? 'Файл удален' : 'Изменен на диске',
+      hunks: [],
     };
   }
 }

@@ -1,0 +1,17 @@
+# Системные папки и зависимости
+node_modules/
+.git/
+dist/
+build/
+out/
+.next/
+.cache/
+.agents/
+tmp/
+*.log
+.agentignore
+.agent-inspector/
+*.vsix
+.vscode-test/
+.DS_Store
+Thumbs.db

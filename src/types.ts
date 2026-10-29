@@ -1,6 +1,15 @@
 import * as vscode from 'vscode';
 
 /**
+ * Диапазон измененных строк
+ */
+export interface DiffHunkRange {
+  startLine: number;
+  endLine: number;
+  isAddition: boolean;
+}
+
+/**
  * Информация об изменении файла внешним агентом
  */
 export interface FileChangeInfo {
@@ -15,6 +24,7 @@ export interface FileChangeInfo {
   isProtected: boolean;
   isUntracked: boolean;
   isDeleted: boolean;
+  hunks: DiffHunkRange[];
 }
 
 /**
@@ -26,7 +36,7 @@ export interface TurnCheckpoint {
   title: string;
   timestamp: number;
   files: FileChangeInfo[];
-  snapshotDir?: string;
+  folderName: string; // Например, "2026_10_29_14_03_29"
 }
 
 /**
@@ -38,6 +48,7 @@ export interface ExtensionConfig {
   openMode: 'diff' | 'document';
   openLocation: 'beside' | 'active';
   jumpToFirstChange: boolean;
+  enableHighlight: boolean;
   showNotification: boolean;
   treeViewMode: 'tree' | 'flat';
   autoArchive: boolean;

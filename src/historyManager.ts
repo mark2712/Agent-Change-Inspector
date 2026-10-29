@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ExtensionConfig, FileChangeInfo, TurnCheckpoint } from './types';
-import { SnapshotManager } from './snapshotManager';
+import { ArchiveManager, formatArchiveTimestamp } from './archiveManager';
 
 function getNoun(number: number, one: string, two: string, five: string): string {
   let n = Math.abs(number);
@@ -19,25 +19,25 @@ function getNoun(number: number, one: string, two: string, five: string): string
 }
 
 /**
- * Управление историей шагов выполнения промптов и авто-архивированием
+ * Управление историей шагов выполнения промптов, архивом в .agent-inspector и авто-сворачиванием
  */
 export class HistoryManager implements vscode.Disposable {
   private currentTurnChanges = new Map<string, FileChangeInfo>();
   private history: TurnCheckpoint[] = [];
   private activeTurnId = `turn_${Date.now()}`;
+  private currentFolderName = formatArchiveTimestamp();
   private turnCounter = 1;
   private cooldownTimer: NodeJS.Timeout | null = null;
-  private snapshotManager: SnapshotManager;
+  private archiveManager: ArchiveManager;
 
   private _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChange = this._onDidChange.event;
 
   constructor(
     private readonly getConfig: () => ExtensionConfig,
-    private readonly workspaceRoot: string,
-    storageDir?: string
+    private readonly workspaceRoot: string
   ) {
-    this.snapshotManager = new SnapshotManager(storageDir, workspaceRoot);
+    this.archiveManager = new ArchiveManager(workspaceRoot);
   }
 
   /**
@@ -68,13 +68,8 @@ export class HistoryManager implements vscode.Disposable {
     const config = this.getConfig();
 
     for (const change of changes) {
-      // Сохраняем исходное состояние файла в снэпшот шага (хранится вне проекта)
-      await this.snapshotManager.saveFileSnapshot(
-        this.activeTurnId,
-        change.fsPath,
-        this.workspaceRoot
-      );
-
+      // Сохраняем исходную копию файла ДО правок в .agent-inspector/<timestamp>/...
+      await this.archiveManager.archivePreChangeFile(this.currentFolderName, change);
       this.currentTurnChanges.set(change.fsPath, change);
     }
 
@@ -138,7 +133,7 @@ export class HistoryManager implements vscode.Disposable {
       title: `Шаг ${this.turnCounter}: ${timeStr} (${files.length} ${noun}${diffPart})`,
       timestamp: Date.now(),
       files,
-      snapshotDir: this.activeTurnId,
+      folderName: this.currentFolderName,
     };
 
     this.turnCounter++;
@@ -151,16 +146,17 @@ export class HistoryManager implements vscode.Disposable {
 
     this.currentTurnChanges.clear();
     this.activeTurnId = `turn_${Date.now()}`;
+    this.currentFolderName = formatArchiveTimestamp();
 
-    // Очищаем снимки старых шагов
-    this.snapshotManager.cleanupOldSnapshots(this.history.map((h) => h.id));
+    // Очищаем старые папки архива, оставляя активные
+    this.archiveManager.cleanupOldFolders(this.history.map((h) => h.folderName));
 
     this._onDidChange.fire();
     return checkpoint;
   }
 
   /**
-   * Откатить указанный шаг из архива
+   * Откатить указанный шаг из архива (восстановить копии файлов из .agent-inspector)
    */
   async revertTurn(turnId: string): Promise<boolean> {
     const idx = this.history.findIndex((h) => h.id === turnId);
@@ -169,7 +165,10 @@ export class HistoryManager implements vscode.Disposable {
     }
 
     const checkpoint = this.history[idx];
-    const ok = await this.snapshotManager.restoreTurn(checkpoint, this.workspaceRoot);
+    const ok = await this.archiveManager.restoreFromArchive(
+      checkpoint.folderName,
+      checkpoint.files
+    );
 
     if (ok) {
       this.history.splice(idx, 1);
@@ -184,7 +183,7 @@ export class HistoryManager implements vscode.Disposable {
    */
   clearHistory(): void {
     this.history = [];
-    this.snapshotManager.cleanupOldSnapshots([]);
+    this.archiveManager.cleanupOldFolders([]);
     this._onDidChange.fire();
   }
 
@@ -198,6 +197,7 @@ export class HistoryManager implements vscode.Disposable {
     }
     this.currentTurnChanges.clear();
     this.activeTurnId = `turn_${Date.now()}`;
+    this.currentFolderName = formatArchiveTimestamp();
     this._onDidChange.fire();
   }
 
