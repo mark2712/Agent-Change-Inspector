@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { ExtensionConfig, FileChangeInfo } from './types';
-import { revertGitFile } from './gitHelper';
 
 /**
- * Модуль открытия и навигации по измененным файлам
+ * Модуль открытия и навигации по измененным файлам (через Diff со снимком или обычную вкладку)
  */
 export class DiffPresenter {
-  constructor(private readonly getConfig: () => ExtensionConfig) {}
+  constructor(
+    private readonly getConfig: () => ExtensionConfig,
+    private readonly onRevertFile?: (change: FileChangeInfo) => Promise<boolean>
+  ) {}
 
   /**
    * Закрепить активную вкладку, чтобы убрать режим предпросмотра (курсив)
@@ -15,12 +19,12 @@ export class DiffPresenter {
     try {
       await vscode.commands.executeCommand('workbench.action.keepEditor');
     } catch {
-      // Игнорируем ошибку, если команда недоступна
+      // Игнорируем
     }
   }
 
   /**
-   * Открыть файл как постоянную вкладку документа
+   * Открыть файл как постоянную вкладку документа с переходом к первой измененной строке
    */
   async openDocumentTab(
     change: FileChangeInfo,
@@ -28,7 +32,7 @@ export class DiffPresenter {
   ): Promise<vscode.TextEditor | undefined> {
     const config = this.getConfig();
 
-    // Если файл удален, открывать его как обычный документ невозможно — открываем Diff
+    // Если файл удален, открываем снимок из архива
     if (change.isDeleted) {
       await this.openDiffTab(change, targetColumn);
       return undefined;
@@ -58,13 +62,13 @@ export class DiffPresenter {
 
       return editor;
     } catch (err) {
-      console.error(`Ошибка при открытии файла ${change.fsPath}:`, err);
+      console.error(`[AgentInspector] Ошибка при открытии файла ${change.fsPath}:`, err);
       return undefined;
     }
   }
 
   /**
-   * Открыть окно сравнения (Diff)
+   * Открыть окно сравнения (Diff) со снимком ДО изменений
    */
   async openDiffTab(
     change: FileChangeInfo,
@@ -72,59 +76,80 @@ export class DiffPresenter {
   ): Promise<void> {
     const config = this.getConfig();
 
-    // Если файл новый и неотслеживаемый в Git, Diff невозможен
-    if (change.isUntracked && !change.isDeleted) {
+    // 1. Если файл новый (добавленный) — снимка "до изменений" нет, открываем сам файл
+    if (change.status === 'added' || (change.isUntracked && !change.isDeleted)) {
       await this.openDocumentTab(change, targetColumn);
       return;
     }
 
-    try {
-      await vscode.commands.executeCommand('git.openChange', change.uri);
-      await this.keepActiveTab();
-
-      setTimeout(async () => {
+    // 2. Если файл удален, но есть снимок — открываем снимок
+    if (change.isDeleted) {
+      if (change.snapshotPath && fs.existsSync(change.snapshotPath)) {
+        const snapshotUri = vscode.Uri.file(change.snapshotPath);
+        await vscode.commands.executeCommand('vscode.open', snapshotUri);
         await this.keepActiveTab();
-        if (config.jumpToFirstChange && !change.isDeleted) {
-          try {
-            await vscode.commands.executeCommand('workbench.action.compareEditor.nextChange');
-          } catch {
-            // Игнорируем
+      } else {
+        vscode.window.showWarningMessage(`Файл ${change.relativeName} удален, снимок недоступен.`);
+      }
+      return;
+    }
+
+    // 3. Если файл изменен и есть снимок ДО изменений — открываем встроенный VS Code Diff со снимком!
+    if (change.snapshotPath && fs.existsSync(change.snapshotPath)) {
+      const snapshotUri = vscode.Uri.file(change.snapshotPath);
+      const workingUri = change.uri;
+      const fileName = path.basename(change.fsPath);
+      const title = `${fileName} (Снимок до правок ↔ Текущий)`;
+
+      try {
+        await vscode.commands.executeCommand('vscode.diff', snapshotUri, workingUri, title);
+        await this.keepActiveTab();
+
+        // Скроллим к изменению
+        if (config.jumpToFirstChange && change.firstChangedLine) {
+          const line = Math.max(0, change.firstChangedLine - 1);
+          const activeEditor = vscode.window.activeTextEditor;
+          if (activeEditor) {
+            const range = new vscode.Range(line, 0, line, 0);
+            activeEditor.revealRange(range, vscode.TextEditorRevealType.InCenter);
           }
         }
-      }, 150);
-    } catch {
-      if (!change.isDeleted) {
-        await this.openDocumentTab(change, targetColumn);
+        return;
+      } catch (err) {
+        console.error('[AgentInspector] Ошибка при вызове vscode.diff:', err);
       }
     }
+
+    // Запасной вариант — открыть обычную вкладку
+    await this.openDocumentTab(change, targetColumn);
   }
 
   /**
-   * Обработка пакета внешних изменений от агента с защитой от лавины вкладок
+   * Обработка пакета изменений с защитой от лавины вкладок
    */
-  async presentChanges(changes: FileChangeInfo[]): Promise<void> {
+  async presentChanges(
+    changes: FileChangeInfo[],
+    shouldAutoOpen: boolean
+  ): Promise<void> {
     const config = this.getConfig();
     if (changes.length === 0) {
       return;
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
-
-    // 1. Проверяем защищенные файлы
+    // 1. Предупреждение о защищенных файлах
     const protectedChanges = changes.filter((c) => c.isProtected);
     if (protectedChanges.length > 0) {
       const names = protectedChanges.map((c) => c.relativeName).join(', ');
       vscode.window
         .showErrorMessage(
-          `⚠️ ВНИМАНИЕ: Агент изменил защищенные файлы: ${names}`,
+          `⚠️ ВНИМАНИЕ: Изменены защищенные файлы: ${names}`,
           'Откатить изменения',
           'Открыть файл'
         )
         .then(async (action) => {
-          if (action === 'Откатить изменения') {
+          if (action === 'Откатить изменения' && this.onRevertFile) {
             for (const change of protectedChanges) {
-              await revertGitFile(change.fsPath, workspaceRoot);
+              await this.onRevertFile(change);
             }
             vscode.window.showInformationMessage('Изменения в защищенных файлах откатаны.');
           } else if (action === 'Открыть файл') {
@@ -133,20 +158,16 @@ export class DiffPresenter {
         });
     }
 
-    // 2. АВТОМАТИЧЕСКОЕ ОТКРЫТИЕ ВКЛАДОК С ЗАЩИТОЙ ОТ ЛАВИНЫ:
-    // Если изменено больше файлов, чем maxAutoOpenFiles, открываем только первые N файлов
-    // (по умолчанию 5), чтобы редактор не зависал при пакетных операциях или копировании папок.
-    const maxFiles = Math.max(1, config.maxAutoOpenFiles ?? 5);
-
-    if (config.autoOpen) {
-      const filesToOpen = changes.slice(0, maxFiles);
+    // 2. Автоматическое открытие вкладок:
+    // Только если shouldAutoOpen === true (нет лавинного потока < 200 мс и размер пачки небольшой)
+    if (config.autoOpen && shouldAutoOpen) {
+      const maxFiles = Math.max(1, config.maxAutoOpenFiles ?? 3);
+      const filesToOpen = changes.filter((c) => !c.isBinary && !c.isLarge).slice(0, maxFiles);
       const targetColumn =
         config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
 
       for (const change of filesToOpen) {
-        if (change.isDeleted) {
-          await this.openDiffTab(change, targetColumn);
-        } else if (config.openMode === 'diff' && !change.isUntracked) {
+        if (config.openMode === 'diff' && !change.isUntracked && !change.isDeleted) {
           await this.openDiffTab(change, targetColumn);
         } else {
           await this.openDocumentTab(change, targetColumn);

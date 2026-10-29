@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ExtensionConfig, FileChangeInfo, TurnCheckpoint } from './types';
-import { ArchiveManager, formatArchiveTimestamp } from './archiveManager';
+import { StorageManager, formatArchiveTimestamp } from './storageManager';
+import { BaselineManager } from './baselineManager';
 
 function getNoun(number: number, one: string, two: string, five: string): string {
   let n = Math.abs(number);
@@ -19,68 +20,70 @@ function getNoun(number: number, one: string, two: string, five: string): string
 }
 
 /**
- * Управление историей шагов выполнения промптов, архивом в .agent-inspector и авто-сворачиванием
+ * Управление шагами правок, активными изменениями и архивом в .agent-inspector
  */
 export class HistoryManager implements vscode.Disposable {
   private currentTurnChanges = new Map<string, FileChangeInfo>();
   private history: TurnCheckpoint[] = [];
-  private activeTurnId = `turn_${Date.now()}`;
-  private currentFolderName = formatArchiveTimestamp();
+  private activeFolderName = formatArchiveTimestamp();
   private turnCounter = 1;
   private cooldownTimer: NodeJS.Timeout | null = null;
-  private archiveManager: ArchiveManager;
 
   private _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChange = this._onDidChange.event;
 
   constructor(
     private readonly getConfig: () => ExtensionConfig,
-    private readonly workspaceRoot: string
+    private readonly storageManager: StorageManager,
+    private readonly baselineManager: BaselineManager
   ) {
-    this.archiveManager = new ArchiveManager(workspaceRoot);
+    this.initHistory();
   }
 
-  /**
-   * Получить текущие активные правки (текущий промпт)
-   */
+  private async initHistory() {
+    this.history = await this.storageManager.loadHistory();
+    this.turnCounter = this.history.length + 1;
+    this._onDidChange.fire();
+  }
+
+  getActiveFolderName(): string {
+    return this.activeFolderName;
+  }
+
   getCurrentChanges(): FileChangeInfo[] {
     return Array.from(this.currentTurnChanges.values());
   }
 
-  /**
-   * Получить историю завершенных шагов (архив)
-   */
   getHistory(): TurnCheckpoint[] {
     return this.history;
   }
 
-  /**
-   * Проверить, отслеживается ли файл в текущих правках
-   */
   isCurrentFileTracked(fsPath: string): boolean {
     return this.currentTurnChanges.has(fsPath);
   }
 
   /**
-   * Добавить или обновить изменения в текущем шаге
+   * Записать новые или обновленные активные изменения
    */
   async recordChanges(changes: FileChangeInfo[]): Promise<void> {
-    const config = this.getConfig();
-
     for (const change of changes) {
-      // Сохраняем исходную копию файла ДО правок в .agent-inspector/<timestamp>/...
-      await this.archiveManager.archivePreChangeFile(this.currentFolderName, change);
       this.currentTurnChanges.set(change.fsPath, change);
     }
 
+    // Сохраняем актуальное дерево в current.json
+    await this.storageManager.saveCurrentTree(
+      Array.from(this.currentTurnChanges.values()),
+      this.activeFolderName
+    );
+
     this._onDidChange.fire();
 
-    // Запускаем / сбрасываем таймер авто-архивирования по окну бездействия
+    // Опциональный авто-архив (если включен в настройках)
+    const config = this.getConfig();
     if (config.autoArchive) {
       if (this.cooldownTimer) {
         clearTimeout(this.cooldownTimer);
       }
-
       const cooldownMs = Math.max(3000, (config.autoArchiveSeconds || 8) * 1000);
       this.cooldownTimer = setTimeout(() => {
         this.archiveCurrentTurn();
@@ -93,111 +96,148 @@ export class HistoryManager implements vscode.Disposable {
    */
   removeCurrentFile(fsPath: string): void {
     if (this.currentTurnChanges.delete(fsPath)) {
+      this.storageManager.saveCurrentTree(
+        Array.from(this.currentTurnChanges.values()),
+        this.activeFolderName
+      );
       this._onDidChange.fire();
     }
   }
 
   /**
-   * Зафиксировать текущие изменения и перенести их в архив шагов
+   * Откатить отдельный файл в текущем шаге
    */
-  archiveCurrentTurn(): TurnCheckpoint | null {
-    if (this.cooldownTimer) {
-      clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = null;
+  async revertCurrentFile(fsPath: string): Promise<boolean> {
+    const change = this.currentTurnChanges.get(fsPath);
+    if (!change) {
+      return false;
     }
 
-    const files = Array.from(this.currentTurnChanges.values());
+    const ok = await this.storageManager.restoreFileFromSnapshot(this.activeFolderName, change);
+    if (ok) {
+      this.removeCurrentFile(fsPath);
+    }
+    return ok;
+  }
+
+  /**
+   * Откатить ВСЕ активные изменения текущего шага
+   */
+  async revertAllCurrentChanges(): Promise<boolean> {
+    const current = this.getCurrentChanges();
+    if (current.length === 0) {
+      return true;
+    }
+
+    let allOk = true;
+    for (const change of current) {
+      const ok = await this.storageManager.restoreFileFromSnapshot(this.activeFolderName, change);
+      if (!ok) {
+        allOk = false;
+      }
+    }
+
+    this.currentTurnChanges.clear();
+    await this.storageManager.saveCurrentTree([], this.activeFolderName);
+    this._onDidChange.fire();
+    return allOk;
+  }
+
+  /**
+   * Зафиксировать текущий шаг (вручную по кнопке или авто)
+   */
+  async archiveCurrentTurn(): Promise<TurnCheckpoint | null> {
+    const files = this.getCurrentChanges();
     if (files.length === 0) {
       return null;
     }
 
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], {
+    const d = new Date();
+    const timeStr = d.toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
     });
-
-    let totalAdded = 0;
-    let totalDeleted = 0;
-    for (const f of files) {
-      totalAdded += f.addedLines;
-      totalDeleted += f.deletedLines;
-    }
-
-    const diffPart = totalAdded > 0 || totalDeleted > 0 ? `: +${totalAdded}/-${totalDeleted}` : '';
-    const noun = getNoun(files.length, 'файл', 'файла', 'файлов');
+    const fileWord = getNoun(files.length, 'файл', 'файла', 'файлов');
 
     const checkpoint: TurnCheckpoint = {
-      id: this.activeTurnId,
-      stepNumber: this.turnCounter,
-      title: `Шаг ${this.turnCounter}: ${timeStr} (${files.length} ${noun}${diffPart})`,
+      id: this.activeFolderName,
+      stepNumber: this.turnCounter++,
+      title: `Шаг №${this.turnCounter - 1} (${timeStr}) — ${files.length} ${fileWord}`,
       timestamp: Date.now(),
+      folderName: this.activeFolderName,
       files,
-      folderName: this.currentFolderName,
     };
 
-    this.turnCounter++;
+    // 1. Сохраняем манифест дерева шага в .agent-inspector/tree/<folderName>.json
+    await this.storageManager.archiveStep(checkpoint);
+
+    // 2. Обновляем базовую линию (зафиксированные изменения становятся новым baseline)
+    await this.baselineManager.commitChanges(files);
+
+    // 3. Добавляем в историю (новые шаги сверху)
     this.history.unshift(checkpoint);
 
-    // Ограничиваем историю 25 последними шагами
-    if (this.history.length > 25) {
-      this.history.pop();
-    }
-
+    // 4. Очищаем текущий шаг и готовим новую папку для следующего шага
     this.currentTurnChanges.clear();
-    this.activeTurnId = `turn_${Date.now()}`;
-    this.currentFolderName = formatArchiveTimestamp();
+    this.activeFolderName = formatArchiveTimestamp();
 
-    // Очищаем старые папки архива, оставляя активные
-    this.archiveManager.cleanupOldFolders(this.history.map((h) => h.folderName));
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
 
     this._onDidChange.fire();
     return checkpoint;
   }
 
   /**
-   * Откатить указанный шаг из архива (восстановить копии файлов из .agent-inspector)
+   * Откатить шаг из архива
    */
-  async revertTurn(turnId: string): Promise<boolean> {
-    const idx = this.history.findIndex((h) => h.id === turnId);
-    if (idx === -1) {
+  async revertTurn(checkpointId: string): Promise<boolean> {
+    const cp = this.history.find((h) => h.id === checkpointId);
+    if (!cp) {
       return false;
     }
 
-    const checkpoint = this.history[idx];
-    const ok = await this.archiveManager.restoreFromArchive(
-      checkpoint.folderName,
-      checkpoint.files
-    );
-
+    const ok = await this.storageManager.restoreStep(cp);
     if (ok) {
-      this.history.splice(idx, 1);
+      // Обновляем baseline после отката
+      await this.baselineManager.revertChangesToBaseline(cp.files);
       this._onDidChange.fire();
     }
-
     return ok;
   }
 
   /**
-   * Очистить историю архива
+   * Восстановить отдельный файл из архивного шага
    */
-  clearHistory(): void {
-    this.history = [];
-    this.archiveManager.cleanupOldFolders([]);
-    this._onDidChange.fire();
+  async restoreFileFromArchive(checkpointId: string, relPath: string): Promise<boolean> {
+    const cp = this.history.find((h) => h.id === checkpointId);
+    if (!cp) {
+      return false;
+    }
+
+    const file = cp.files.find((f) => f.relativeName === relPath);
+    if (!file) {
+      return false;
+    }
+
+    return await this.storageManager.restoreFileFromSnapshot(cp.folderName, file);
   }
 
   /**
-   * Очистить текущий активный шаг
+   * Очистить историю шагов
    */
+  async clearHistory(): Promise<void> {
+    await this.storageManager.clearAllHistory();
+    this.history = [];
+    this._onDidChange.fire();
+  }
+
   clearCurrent(): void {
-    if (this.cooldownTimer) {
-      clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = null;
-    }
     this.currentTurnChanges.clear();
-    this.activeTurnId = `turn_${Date.now()}`;
-    this.currentFolderName = formatArchiveTimestamp();
+    this.storageManager.saveCurrentTree([], this.activeFolderName);
     this._onDidChange.fire();
   }
 
@@ -205,7 +245,6 @@ export class HistoryManager implements vscode.Disposable {
     if (this.cooldownTimer) {
       clearTimeout(this.cooldownTimer);
     }
-    this.currentTurnChanges.clear();
-    this.history = [];
+    this._onDidChange.dispose();
   }
 }

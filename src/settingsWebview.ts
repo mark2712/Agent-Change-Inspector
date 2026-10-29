@@ -378,7 +378,7 @@ export class SettingsWebviewPanel {
         <div class="setting-desc">Окно сравнения Diff (рекомендуется) или обычная вкладка с кодом</div>
       </div>
       <select id="openModeSelect" onchange="updateConfig('openMode', this.value)">
-        <option value="diff">Diff (Окно сравнения Git)</option>
+        <option value="diff">Diff (Окно сравнения со снимком)</option>
         <option value="document">Обычный документ</option>
       </select>
     </div>

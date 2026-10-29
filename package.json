@@ -2,7 +2,7 @@
   "name": "agent-change-inspector",
   "displayName": "Agent Change Inspector (AI Diff Guard)",
   "description": "Автоматически открывает файлы при изменении агентом/ИИ, показывает точные строки изменений, проводник правок, историю шагов и защищает проект",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "publisher": "antigravity-tools",
   "repository": {
     "type": "git",
@@ -200,7 +200,7 @@
             "document"
           ],
           "default": "diff",
-          "description": "Режим открытия: 'diff' (окно сравнения Git) или 'document' (обычная вкладка)"
+          "description": "Режим открытия: 'diff' (окно сравнения со снимком) или 'document' (обычная вкладка)"
         },
         "agentDiff.openLocation": {
           "type": "string",
@@ -228,8 +228,8 @@
         },
         "agentDiff.autoArchive": {
           "type": "boolean",
-          "default": true,
-          "description": "Автоматически архивировать шаг промпта в историю после паузы в правках"
+          "default": false,
+          "description": "Автоматически архивировать шаг промпта в историю после паузы в правках (по умолчанию выключено, шаг фиксируется кнопкой)"
         },
         "agentDiff.autoArchiveSeconds": {
           "type": "number",
@@ -281,9 +281,19 @@
           ],
           "description": "Игнорируемые пути при отслеживании изменений"
         },
+        "agentDiff.burstThresholdMs": {
+          "type": "number",
+          "default": 200,
+          "description": "Порог интервала (мс) между изменениями файлов. Если файлы меняются быстрее 200 мс, авто-открытие вкладок блокируется (защита от копирования и лавин)."
+        },
+        "agentDiff.maxFileSizeBytes": {
+          "type": "number",
+          "default": 2097152,
+          "description": "Максимальный размер текстового файла в байтах (по умолчанию 2 МБ) для построчного diff-анализа."
+        },
         "agentDiff.debounceMs": {
           "type": "number",
-          "default": 400,
+          "default": 300,
           "description": "Задержка в миллисекундах для группировки правок нескольких файлов"
         }
       }

@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { FileChangeInfo } from './types';
 
 /**
- * Менеджер мягкой подсветки измененных строк и маркеров на полях (Gutter)
+ * Менеджер подсветки измененных строк, полосок на полях (Gutter) и маркеров на миникарте/скроллбаре
  */
 export class DecorationManager implements vscode.Disposable {
   private addedLinesType: vscode.TextEditorDecorationType;
@@ -11,21 +12,32 @@ export class DecorationManager implements vscode.Disposable {
   private isEnabled = true;
 
   constructor(
+    extensionUri: vscode.Uri,
     private readonly getChangeInfo: (uri: vscode.Uri) => FileChangeInfo | undefined
   ) {
-    // Подсветка добавленных/измененных строк (мягкий зеленый фон + полоса на скроллбаре)
+    const addedGutterUri = vscode.Uri.joinPath(extensionUri, 'resources', 'gutter-added.svg');
+    const deletedGutterUri = vscode.Uri.joinPath(extensionUri, 'resources', 'gutter-deleted.svg');
+
+    // Подсветка добавленных/измененных строк:
+    // - Четкая зеленая полоска в gutter (рядом с номерами строк)
+    // - Мягкий полупрозрачный фон строки
+    // - Маркер на полосе прокрутки (Overview Ruler)
     this.addedLinesType = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
       backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
+      gutterIconPath: addedGutterUri,
+      gutterIconSize: 'contain',
       overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
+      overviewRulerLane: vscode.OverviewRulerLane.Right,
     });
 
-    // Маркер удаленных строк (красная метка на скроллбаре)
+    // Маркер удаленных строк (красный треугольник в gutter + метка на полосе прокрутки)
     this.deletedLineType = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
+      gutterIconPath: deletedGutterUri,
+      gutterIconSize: 'contain',
       overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
+      overviewRulerLane: vscode.OverviewRulerLane.Right,
       border: '1px dashed rgba(248, 81, 73, 0.45)',
     });
 
@@ -40,7 +52,7 @@ export class DecorationManager implements vscode.Disposable {
       })
     );
 
-    // Слушаем редактирование документа
+    // Слушаем редактирование документа в редакторе
     this.disposables.push(
       vscode.workspace.onDidChangeTextDocument((e) => {
         const active = vscode.window.activeTextEditor;
@@ -50,10 +62,8 @@ export class DecorationManager implements vscode.Disposable {
       })
     );
 
-    // Подсвечиваем текущий активный редактор при запуске
-    if (vscode.window.activeTextEditor) {
-      this.decorateEditor(vscode.window.activeTextEditor);
-    }
+    // Подсвечиваем все открытые редакторы
+    this.refreshAllVisibleEditors();
   }
 
   setEnabled(enabled: boolean) {
@@ -91,16 +101,17 @@ export class DecorationManager implements vscode.Disposable {
 
     const addedRanges: vscode.Range[] = [];
     const deletedRanges: vscode.Range[] = [];
-    const maxLine = editor.document.lineCount - 1;
+    const maxLine = Math.max(0, editor.document.lineCount - 1);
 
     for (const hunk of change.hunks) {
       const start = Math.max(0, Math.min(maxLine, hunk.startLine - 1));
       const end = Math.max(0, Math.min(maxLine, hunk.endLine - 1));
 
       if (hunk.isAddition) {
-        addedRanges.push(new vscode.Range(start, 0, end, 0));
+        // Задаем диапазон всей строки
+        addedRanges.push(new vscode.Range(start, 0, end, 1000));
       } else {
-        deletedRanges.push(new vscode.Range(start, 0, start, 0));
+        deletedRanges.push(new vscode.Range(start, 0, start, 1000));
       }
     }
 

@@ -1,6 +1,11 @@
 import * as vscode from 'vscode';
 
 /**
+ * Тип изменения файла
+ */
+export type FileChangeStatus = 'modified' | 'added' | 'deleted' | 'copied' | 'moved';
+
+/**
  * Диапазон измененных строк
  */
 export interface DiffHunkRange {
@@ -10,13 +15,14 @@ export interface DiffHunkRange {
 }
 
 /**
- * Информация об изменении файла внешним агентом
+ * Информация об изменении файла
  */
 export interface FileChangeInfo {
   uri: vscode.Uri;
   fsPath: string;
   relativeName: string;
   timestamp: number;
+  status: FileChangeStatus;
   changedLinesSummary: string;
   firstChangedLine?: number;
   addedLines: number;
@@ -24,11 +30,15 @@ export interface FileChangeInfo {
   isProtected: boolean;
   isUntracked: boolean;
   isDeleted: boolean;
+  isBinary?: boolean;
+  isLarge?: boolean;
   hunks: DiffHunkRange[];
+  snapshotPath?: string;
+  oldRelativeName?: string;
 }
 
 /**
- * Чекпоинт (шаг выполнения промпта) в истории
+ * Чекпоинт (шаг) в истории
  */
 export interface TurnCheckpoint {
   id: string;
@@ -36,7 +46,7 @@ export interface TurnCheckpoint {
   title: string;
   timestamp: number;
   files: FileChangeInfo[];
-  folderName: string; // Например, "2026_10_29_14_03_29"
+  folderName: string;
 }
 
 /**
@@ -57,4 +67,6 @@ export interface ExtensionConfig {
   protectedPatterns: string[];
   ignorePatterns: string[];
   debounceMs: number;
+  maxFileSizeBytes: number;
+  burstThresholdMs: number;
 }

@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
 import { FileChangeInfo } from './types';
-import { revertGitFile } from './gitHelper';
 
 /**
- * Управление строкой состояния и меню быстрого доступа
+ * Управление строкой состояния и всплывающим меню быстрого доступа
  */
 export class StatusBarManager implements vscode.Disposable {
   private statusBarItem: vscode.StatusBarItem;
@@ -24,15 +23,10 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   /**
-   * Обновить список последних изменений
+   * Обновить список активных изменений
    */
   updateChanges(changes: FileChangeInfo[]) {
-    // Сохраняем последние 20 изменений
-    const existingMap = new Map(this.recentChanges.map((c) => [c.fsPath, c]));
-    for (const change of changes) {
-      existingMap.set(change.fsPath, change);
-    }
-    this.recentChanges = Array.from(existingMap.values()).slice(-20);
+    this.recentChanges = changes;
     this.updateStatus();
   }
 
@@ -42,37 +36,50 @@ export class StatusBarManager implements vscode.Disposable {
   updateStatus() {
     if (!this.isEnabled()) {
       this.statusBarItem.text = '$(circle-slash) AI Diff: Выкл';
-      this.statusBarItem.tooltip = 'Отслеживание изменений ИИ выключено. Кликните для включения.';
+      this.statusBarItem.tooltip = 'Отслеживание изменений выключено. Кликните для включения.';
       return;
     }
 
     if (this.recentChanges.length === 0) {
       this.statusBarItem.text = '$(hubot) AI Diff: Ожидание';
-      this.statusBarItem.tooltip = 'Ожидание правок от ИИ/агента. Кликните для просмотра меню.';
+      this.statusBarItem.tooltip = 'Ожидание правок в проекте. Кликните для вызова меню.';
     } else {
+      const count = this.recentChanges.length;
       const last = this.recentChanges[this.recentChanges.length - 1];
-      this.statusBarItem.text = `$(hubot) ИИ: ${last.relativeName} (${last.changedLinesSummary})`;
-      this.statusBarItem.tooltip = `Последнее изменение: ${last.relativeName}\n${last.changedLinesSummary}\nКликните для списка всех измененных файлов.`;
+      this.statusBarItem.text = `$(hubot) AI (${count}): ${last.relativeName} (${last.changedLinesSummary})`;
+      this.statusBarItem.tooltip = `Активных файлов: ${count}\nПоследнее изменение: ${last.relativeName} (${last.changedLinesSummary})\nКликните для фиксации шага или просмотра списка.`;
     }
   }
 
   /**
-   * Показать меню QuickPick со списком файлов и действиями
+   * Меню быстрого доступа QuickPick
    */
   async showMenu() {
-    interface QuickPickItemWithAction extends vscode.QuickPickItem {
-      actionType: 'open' | 'revert_one' | 'revert_all' | 'toggle' | 'clear';
+    interface QuickActionItem extends vscode.QuickPickItem {
+      actionType: 'open' | 'archive' | 'revert_all' | 'toggle' | 'treeMode' | 'highlight' | 'settings';
       change?: FileChangeInfo;
     }
 
-    const items: QuickPickItemWithAction[] = [];
+    const items: QuickActionItem[] = [];
 
-    // Список последних файлов
+    // Если есть активные изменения — даем кнопку фиксации шага на самом верху!
     if (this.recentChanges.length > 0) {
       items.push({
-        label: 'ИЗМЕНЕННЫЕ ФАЙЛЫ (кликните для открытия Diff):',
+        label: `$(archive) Зафиксировать текущий шаг (${this.recentChanges.length} файлов)`,
+        description: 'Сохранить снимок в .agent-inspector и перенести в историю',
+        actionType: 'archive',
+      });
+
+      items.push({
+        label: '$(discard) Откатить ВСЕ активные изменения',
+        description: 'Восстановить все файлы из исходных снимков',
+        actionType: 'revert_all',
+      });
+
+      items.push({
+        label: 'АКТИВНЫЕ ПРАВКИ (кликните для открытия Diff):',
         kind: vscode.QuickPickItemKind.Separator,
-        actionType: 'clear',
+        actionType: 'archive',
       });
 
       for (const change of [...this.recentChanges].reverse()) {
@@ -84,58 +91,73 @@ export class StatusBarManager implements vscode.Disposable {
           change,
         });
       }
-
-      items.push({
-        label: 'ДЕЙСТВИЯ:',
-        kind: vscode.QuickPickItemKind.Separator,
-        actionType: 'clear',
-      });
-
-      items.push({
-        label: '$(discard) Откатить ВСЕ недавние изменения ИИ',
-        description: 'Выполнить git restore для всех файлов в списке',
-        actionType: 'revert_all',
-      });
     }
+
+    items.push({
+      label: 'УПРАВЛЕНИЕ И НАСТРОЙКИ:',
+      kind: vscode.QuickPickItemKind.Separator,
+      actionType: 'archive',
+    });
+
+    items.push({
+      label: '$(paintcan) Переключить подсветку строк в коде',
+      description: 'Включить/выключить маркеры и фон измененных строк',
+      actionType: 'highlight',
+    });
+
+    items.push({
+      label: '$(list-tree) Переключить вид (Дерево / Список)',
+      description: 'Сменить режим отображения в проводнике',
+      actionType: 'treeMode',
+    });
+
+    items.push({
+      label: '$(gear) Настройки Agent Inspector',
+      description: 'Открыть панель настроек и правил исключений',
+      actionType: 'settings',
+    });
 
     items.push({
       label: this.isEnabled()
         ? '$(circle-slash) Отключить авто-отслеживание'
         : '$(check) Включить авто-отслеживание',
-      description: 'Переключить режим фонового наблюдения',
+      description: 'Глобальное переключение активности расширения',
       actionType: 'toggle',
     });
 
     const selected = await vscode.window.showQuickPick(items, {
-      placeHolder: 'Выберите файл для просмотра или действие',
+      placeHolder: 'Agent Change Inspector — Выберите действие',
     });
 
     if (!selected) {
       return;
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
-
-    if (selected.actionType === 'open' && selected.change) {
-      this.onSelectFile(selected.change);
-    } else if (selected.actionType === 'toggle') {
-      this.onToggleEnabled();
-      this.updateStatus();
-    } else if (selected.actionType === 'revert_all') {
-      const confirm = await vscode.window.showWarningMessage(
-        `Вы уверены, что хотите откатить все (${this.recentChanges.length}) измененные файлы?`,
-        'Да, откатить все',
-        'Отмена'
-      );
-      if (confirm === 'Да, откатить все') {
-        for (const change of this.recentChanges) {
-          await revertGitFile(change.fsPath, workspaceRoot);
+    switch (selected.actionType) {
+      case 'open':
+        if (selected.change) {
+          this.onSelectFile(selected.change);
         }
-        this.recentChanges = [];
+        break;
+      case 'archive':
+        await vscode.commands.executeCommand('agentDiff.archiveCurrentStep');
+        break;
+      case 'revert_all':
+        await vscode.commands.executeCommand('agentDiff.revertAllChanges');
+        break;
+      case 'highlight':
+        await vscode.commands.executeCommand('agentDiff.toggleHighlight');
+        break;
+      case 'treeMode':
+        await vscode.commands.executeCommand('agentDiff.toggleTreeMode');
+        break;
+      case 'settings':
+        await vscode.commands.executeCommand('agentDiff.openSettings');
+        break;
+      case 'toggle':
+        this.onToggleEnabled();
         this.updateStatus();
-        vscode.window.showInformationMessage('Все недавние изменения успешно откатаны.');
-      }
+        break;
     }
   }
 

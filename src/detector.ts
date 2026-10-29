@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { ExtensionConfig, FileChangeInfo } from './types';
-import { getGitDiffSummary } from './gitHelper';
 import { IgnoreManager } from './ignoreManager';
+import { BaselineManager } from './baselineManager';
 
 /**
  * Проверка совпадения пути с глоб-шаблонами
@@ -40,32 +40,39 @@ function matchesPattern(filePath: string, patterns: string[]): boolean {
 }
 
 /**
- * Детектор внешних изменений файлов с защитой от рекурсивных циклов и лавинных событий
+ * Детектор любых внешних и внутренних изменений файлов проекта
+ * (проводник Windows, Python-скрипты, Git, терминал, редакторы VS Code)
+ * с защитой от лавинных событий по таймеру 200 мс.
  */
 export class ChangeDetector implements vscode.Disposable {
   private disposables: vscode.Disposable[] = [];
-  private userSaveTimes = new Map<string, number>();
   private pendingChanges = new Map<string, vscode.Uri>();
   private debounceTimer: NodeJS.Timeout | null = null;
+
+  // Защита от массового копирования / перемещения:
+  // Если изменения сыплются с интервалом менее 200 мс — запрещаем авто-открытие вкладок
+  private lastEventTimestamp = 0;
+  private isBurstMode = false;
+  private burstResetTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly getConfig: () => ExtensionConfig,
     private readonly ignoreManager: IgnoreManager,
+    private readonly baselineManager: BaselineManager,
+    private readonly getActiveFolder: () => string,
     private readonly isFileTracked: (fsPath: string) => boolean,
-    private readonly onBatchProcessed: (changed: FileChangeInfo[], revertedPaths: string[]) => void
+    private readonly onBatchProcessed: (
+      changed: FileChangeInfo[],
+      revertedPaths: string[],
+      shouldAutoOpen: boolean
+    ) => void
   ) {
     this.registerListeners();
   }
 
   private registerListeners() {
-    // 1. Отслеживаем сохранения, сделанные самим пользователем через VS Code
-    this.disposables.push(
-      vscode.workspace.onDidSaveTextDocument((doc) => {
-        this.userSaveTimes.set(path.normalize(doc.fileName), Date.now());
-      })
-    );
-
-    // 2. Создаем системный наблюдатель за файлами проекта (включая удаление)
+    // 1. Создаем глобальный системный наблюдатель за файловой системой проекта
+    // (ловит любые внешние изменения: Python, Explorer, cmd, git и т.д.)
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
 
     this.disposables.push(
@@ -75,19 +82,12 @@ export class ChangeDetector implements vscode.Disposable {
       watcher
     );
 
-    // 3. Периодически очищаем устаревший кэш сохранений (каждые 30 секунд)
-    const cleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [file, time] of this.userSaveTimes.entries()) {
-        if (now - time > 5000) {
-          this.userSaveTimes.delete(file);
-        }
-      }
-    }, 30000);
-
-    this.disposables.push({
-      dispose: () => clearInterval(cleanupInterval),
-    });
+    // 2. Также слушаем сохранения внутри VS Code
+    this.disposables.push(
+      vscode.workspace.onDidSaveTextDocument((doc) => {
+        this.handleFileEvent(doc.uri);
+      })
+    );
   }
 
   private handleFileEvent(uri: vscode.Uri) {
@@ -99,111 +99,111 @@ export class ChangeDetector implements vscode.Disposable {
     const fsPath = path.normalize(uri.fsPath);
     const normalized = fsPath.replace(/\\/g, '/').toLowerCase();
 
-    // 0. ЖЕСТКАЯ БЕЗУСЛОВНАЯ ЗАЩИТА: моментально пресекаем зацикливание и сканирование служебных папок
+    // 0. ЖЕСТКАЯ БЕЗУСЛОВНАЯ ЗАЩИТА: моментально пресекаем служебные папки и рекурсию
     if (
       normalized.includes('/.git/') ||
       normalized.endsWith('/.git') ||
       normalized.includes('/node_modules/') ||
       normalized.includes('/.agent-inspector/') ||
-      normalized.includes('/.vscode/')
+      normalized.includes('/.vscode/') ||
+      normalized.includes('/dist/') ||
+      normalized.includes('/build/')
     ) {
       return;
     }
 
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     const rootPath = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
-    const relPath = path.relative(rootPath, fsPath);
+    const relPath = path.relative(rootPath, fsPath).replace(/\\/g, '/');
 
-    // 1. Быстрая проверка через .agentignore
+    // 1. Проверка через .agent-inspector/.agentignore
     if (this.ignoreManager.isIgnored(relPath)) {
       return;
     }
 
-    // 2. Проверяем список исключений из настроек
+    // 2. Проверка через список исключений настроек
     if (matchesPattern(fsPath, config.ignorePatterns)) {
       return;
     }
 
-    // 3. Проверяем, не было ли это сохранением самого пользователя
-    // Если файл УЖЕ в нашем дереве правок — пропускаем проверку, чтобы зафиксировать Ctrl+Z или отмену!
-    const isAlreadyTracked = this.isFileTracked(fsPath);
-    const lastUserSave = this.userSaveTimes.get(fsPath);
+    // 3. ТАЙМЕР-ЗАЩИТА ОТ КОПИРОВАНИЯ И ПЕРЕМЕЩЕНИЯ (200 мс):
+    // Если событие пришло меньше чем за 200 мс с момента предыдущего — включаем режим пачки
+    const now = Date.now();
+    const interval = now - this.lastEventTimestamp;
+    this.lastEventTimestamp = now;
 
-    if (!isAlreadyTracked && lastUserSave && Date.now() - lastUserSave < 1500) {
-      return;
+    const threshold = config.burstThresholdMs || 200;
+    if (interval < threshold) {
+      this.isBurstMode = true;
     }
 
-    // Добавляем файл в очередь обработки
+    if (this.burstResetTimer) {
+      clearTimeout(this.burstResetTimer);
+    }
+    this.burstResetTimer = setTimeout(() => {
+      this.isBurstMode = false;
+    }, Math.max(300, threshold + 100));
+
+    // Добавляем файл в очередь отложенной обработки
     this.pendingChanges.set(fsPath, uri);
 
-    // Запускаем дебаунс-таймер
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
 
     this.debounceTimer = setTimeout(() => {
       this.flushQueue();
-    }, config.debounceMs);
+    }, config.debounceMs || 300);
   }
 
   private async flushQueue() {
-    let entries = Array.from(this.pendingChanges.entries());
+    const entries = Array.from(this.pendingChanges.entries());
     this.pendingChanges.clear();
 
     if (entries.length === 0) {
       return;
     }
 
-    // ЗАЩИТА ОТ ЛАВИННЫХ СОБЫТИЙ (массовое копирование / распаковка):
-    // Ограничиваем пакет до 50 файлов за итерацию, чтобы не спамить системными процессами
-    if (entries.length > 50) {
-      entries = entries.slice(0, 50);
-    }
-
     const config = this.getConfig();
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
+    const currentStepFolder = this.getActiveFolder();
+
+    // Защита: если зафиксирован лавинный поток или в очереди более 3 файлов — во вкладках НЕ открываем!
+    const shouldAutoOpen = !this.isBurstMode && entries.length <= 3;
 
     const changed: FileChangeInfo[] = [];
     const reverted: string[] = [];
 
-    for (const [fsPath, uri] of entries) {
+    for (const [fsPath] of entries) {
       const isProtected = matchesPattern(fsPath, config.protectedPatterns);
-      const relativeName = workspaceFolder
-        ? path.relative(workspaceFolder.uri.fsPath, fsPath)
-        : path.basename(fsPath);
 
-      // Получаем информацию о строках через быстрый git diff
-      const gitInfo = await getGitDiffSummary(fsPath, workspaceRoot);
+      // Вычисляем изменение через BaselineManager
+      const change = await this.baselineManager.inspectFileChange(
+        fsPath,
+        currentStepFolder,
+        isProtected
+      );
 
-      if (gitInfo.hasChanges) {
-        changed.push({
-          uri,
-          fsPath,
-          relativeName,
-          timestamp: Date.now(),
-          changedLinesSummary: gitInfo.summaryText,
-          firstChangedLine: gitInfo.firstChangedLine,
-          addedLines: gitInfo.addedLines,
-          deletedLines: gitInfo.deletedLines,
-          isProtected,
-          isUntracked: gitInfo.isUntracked,
-          isDeleted: gitInfo.isDeleted,
-        });
+      if (change) {
+        changed.push(change);
       } else {
-        // Файл вернулся к исходному состоянию (нет изменений в Git: например, Ctrl+Z или git restore)
-        reverted.push(fsPath);
+        // Если изменений нет, но файл ранее был в списке правок — значит, был Ctrl+Z или откат
+        if (this.isFileTracked(fsPath)) {
+          reverted.push(fsPath);
+        }
       }
     }
 
     if (changed.length > 0 || reverted.length > 0) {
-      this.onBatchProcessed(changed, reverted);
+      this.onBatchProcessed(changed, reverted, shouldAutoOpen);
     }
   }
 
   dispose() {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
+    }
+    if (this.burstResetTimer) {
+      clearTimeout(this.burstResetTimer);
     }
     for (const d of this.disposables) {
       d.dispose();
