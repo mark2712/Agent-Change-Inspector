@@ -1,0 +1,249 @@
+{
+  "name": "agent-change-inspector",
+  "displayName": "Agent Change Inspector (AI Diff Guard)",
+  "description": "Автоматически открывает файлы при изменении агентом/ИИ, показывает точные строки изменений, проводник правок и защищает проект",
+  "version": "0.3.1",
+  "publisher": "antigravity-tools",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-inspector-container",
+          "title": "Правки ИИ",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "agent-inspector-files-explorer",
+          "name": "Правки ИИ",
+          "when": "true"
+        }
+      ],
+      "agent-inspector-container": [
+        {
+          "id": "agent-inspector-files",
+          "name": "Измененные файлы",
+          "contextualTitle": "Правки ИИ"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentDiff.toggle",
+        "title": "Переключить авто-отслеживание",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.refreshTree",
+        "title": "Обновить список",
+        "icon": "$(refresh)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.toggleTreeMode",
+        "title": "Переключить вид (Дерево / Список)",
+        "icon": "$(list-tree)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.clearAllChanges",
+        "title": "Очистить список изменений",
+        "icon": "$(clear-all)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.revertAllChanges",
+        "title": "Откатить ВСЕ недавние изменения",
+        "icon": "$(discard)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.openDiff",
+        "title": "Открыть Diff",
+        "icon": "$(diff)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.openFile",
+        "title": "Открыть файл",
+        "icon": "$(go-to-file)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.revertFile",
+        "title": "Откатить изменения файла",
+        "icon": "$(discard)",
+        "category": "Agent Inspector"
+      },
+      {
+        "command": "agentDiff.openSettings",
+        "title": "Настройки Agent Inspector",
+        "icon": "$(gear)",
+        "category": "Agent Inspector"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentDiff.openSettings",
+          "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
+          "group": "navigation@0"
+        },
+        {
+          "command": "agentDiff.refreshTree",
+          "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentDiff.toggleTreeMode",
+          "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentDiff.revertAllChanges",
+          "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentDiff.clearAllChanges",
+          "when": "view == agent-inspector-files || view == agent-inspector-files-explorer",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentDiff.openDiff",
+          "when": "(view == agent-inspector-files || view == agent-inspector-files-explorer) && (viewItem == agentFile || viewItem == agentFileDeleted)",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDiff.openFile",
+          "when": "(view == agent-inspector-files || view == agent-inspector-files-explorer) && viewItem == agentFile",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentDiff.revertFile",
+          "when": "(view == agent-inspector-files || view == agent-inspector-files-explorer) && (viewItem == agentFile || viewItem == agentFileDeleted)",
+          "group": "inline@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent Change Inspector",
+      "properties": {
+        "agentDiff.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Включить автоматическое отслеживание внешних изменений ИИ"
+        },
+        "agentDiff.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Автоматически открывать файлы как вкладки при изменении ИИ"
+        },
+        "agentDiff.openMode": {
+          "type": "string",
+          "enum": [
+            "diff",
+            "document"
+          ],
+          "default": "diff",
+          "description": "Режим открытия: 'diff' (окно сравнения Git) или 'document' (обычная вкладка)"
+        },
+        "agentDiff.openLocation": {
+          "type": "string",
+          "enum": [
+            "active",
+            "beside"
+          ],
+          "default": "active",
+          "description": "Где открывать вкладку: 'active' (в текущей панели со всеми вкладками) или 'beside' (сбоку в сплит-экране)"
+        },
+        "agentDiff.jumpToFirstChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "Автоматически перемещать курсор и скроллить к первой измененной строке"
+        },
+        "agentDiff.showNotification": {
+          "type": "boolean",
+          "default": true,
+          "description": "Показывать всплывающее уведомление с номерами строк и объемом изменений"
+        },
+        "agentDiff.treeViewMode": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "flat"
+          ],
+          "default": "tree",
+          "description": "Вид проводника: 'tree' (иерархическое дерево папок) или 'flat' (плоский список)"
+        },
+        "agentDiff.protectedPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/*.lock",
+            "**/package-lock.json",
+            "**/pnpm-lock.yaml",
+            "**/.env*",
+            "**/protected/**"
+          ],
+          "description": "Список масок файлов, которые агент не должен трогать. При изменении выводится предупреждение!"
+        },
+        "agentDiff.ignorePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/.next/**",
+            "**/.agents/**",
+            "**/tmp/**"
+          ],
+          "description": "Игнорируемые пути при отслеживании изменений"
+        },
+        "agentDiff.debounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Задержка в миллисекундах для группировки правок нескольких файлов"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "build": "node esbuild.js --production",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "ignore": "^7.0.14"
+  }
+}
