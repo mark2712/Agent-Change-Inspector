@@ -17,29 +17,37 @@ export function formatArchiveTimestamp(d = new Date()): string {
 }
 
 /**
- * Менеджер физического архива файлов в .agent-inspector/<timestamp>/...
+ * Менеджер физического архива файлов в .agent-inspector/snapshots/<timestamp>/...
  * Сохраняет точные копии файлов ДО правок агента, повторяя структуру папок проекта.
  */
 export class ArchiveManager {
+  private inspectorDir: string;
   private baseDir: string;
 
   constructor(private readonly workspaceRoot: string) {
-    this.baseDir = path.join(workspaceRoot, '.agent-inspector');
+    this.inspectorDir = path.join(workspaceRoot, '.agent-inspector');
+    this.baseDir = path.join(this.inspectorDir, 'snapshots');
     this.ensureBaseDir();
   }
 
   private ensureBaseDir() {
     try {
+      if (!fs.existsSync(this.inspectorDir)) {
+        fs.mkdirSync(this.inspectorDir, { recursive: true });
+      }
+
+      // Защищаем весь .agent-inspector от попадания в Git
+      const gitignorePath = path.join(this.inspectorDir, '.gitignore');
+      if (!fs.existsSync(gitignorePath)) {
+        fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
+      }
+
+      // Создаем директорию для снимков snapshots
       if (!fs.existsSync(this.baseDir)) {
         fs.mkdirSync(this.baseDir, { recursive: true });
-        // Защищаем архив от попадания в Git
-        const gitignorePath = path.join(this.baseDir, '.gitignore');
-        if (!fs.existsSync(gitignorePath)) {
-          fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
-        }
       }
     } catch (err) {
-      console.error('Ошибка создания директории архива .agent-inspector:', err);
+      console.error('Ошибка создания директории архива .agent-inspector/snapshots:', err);
     }
   }
 

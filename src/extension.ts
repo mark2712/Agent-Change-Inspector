@@ -27,6 +27,7 @@ function getExtensionConfig(): ExtensionConfig {
     openLocation: cfg.get<'beside' | 'active'>('openLocation', 'active'),
     jumpToFirstChange: cfg.get<boolean>('jumpToFirstChange', true),
     enableHighlight: cfg.get<boolean>('enableHighlight', true),
+    maxAutoOpenFiles: cfg.get<number>('maxAutoOpenFiles', 5),
     showNotification: cfg.get<boolean>('showNotification', false),
     treeViewMode: cfg.get<'tree' | 'flat'>('treeViewMode', 'tree'),
     autoArchive: cfg.get<boolean>('autoArchive', true),

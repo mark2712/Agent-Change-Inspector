@@ -16,6 +16,31 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 /**
+ * Найти корень ближайшего Git-репозитория (поддерживает вложенные проекты и монорепозитории)
+ */
+export function findGitRoot(filePath: string, defaultRoot: string): string {
+  try {
+    let dir = fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()
+      ? filePath
+      : path.dirname(filePath);
+
+    while (dir.length >= defaultRoot.length) {
+      if (fs.existsSync(path.join(dir, '.git'))) {
+        return dir;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+  } catch {
+    // Игнорируем
+  }
+  return defaultRoot;
+}
+
+/**
  * Результат анализа изменений через git diff
  */
 export interface GitDiffSummary {
@@ -33,9 +58,10 @@ export interface GitDiffSummary {
  * Проверить, отслеживается ли файл в Git
  */
 export async function isTrackedInGit(filePath: string, workspaceRoot: string): Promise<boolean> {
+  const repoRoot = findGitRoot(filePath, workspaceRoot);
   try {
     await execAsync(`git ls-files --error-unmatch -- "${filePath}"`, {
-      cwd: workspaceRoot,
+      cwd: repoRoot,
       timeout: 2000,
     });
     return true;
@@ -51,10 +77,11 @@ export async function getFileFromGitHead(
   filePath: string,
   workspaceRoot: string
 ): Promise<Buffer | null> {
+  const repoRoot = findGitRoot(filePath, workspaceRoot);
   try {
-    const relPath = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+    const relPath = path.relative(repoRoot, filePath).replace(/\\/g, '/');
     const { stdout } = await execAsync(`git show "HEAD:${relPath}"`, {
-      cwd: workspaceRoot,
+      cwd: repoRoot,
       timeout: 3000,
       encoding: 'buffer',
       maxBuffer: 10 * 1024 * 1024,
@@ -72,6 +99,8 @@ export async function getGitDiffSummary(
   filePath: string,
   workspaceRoot: string
 ): Promise<GitDiffSummary> {
+  const repoRoot = findGitRoot(filePath, workspaceRoot);
+
   try {
     const fileExistsOnDisk = fs.existsSync(filePath);
 
@@ -114,7 +143,7 @@ export async function getGitDiffSummary(
     const { stdout: statusOut } = await execAsync(
       `git status --porcelain --ignore-submodules -- "${filePath}"`,
       {
-        cwd: workspaceRoot,
+        cwd: repoRoot,
         timeout: 2000,
       }
     );
@@ -174,7 +203,7 @@ export async function getGitDiffSummary(
     const { stdout } = await execAsync(
       `git diff -U0 --no-color --ignore-submodules -- "${filePath}"`,
       {
-        cwd: workspaceRoot,
+        cwd: repoRoot,
         timeout: 3000,
       }
     );
@@ -277,6 +306,7 @@ export async function getGitDiffSummary(
  * Откатить изменения в файле через git restore / checkout или удаление untracked
  */
 export async function revertGitFile(filePath: string, workspaceRoot: string): Promise<boolean> {
+  const repoRoot = findGitRoot(filePath, workspaceRoot);
   try {
     const tracked = await isTrackedInGit(filePath, workspaceRoot);
     if (!tracked) {
@@ -288,13 +318,13 @@ export async function revertGitFile(filePath: string, workspaceRoot: string): Pr
 
     try {
       await execAsync(`git restore -- "${filePath}"`, {
-        cwd: workspaceRoot,
+        cwd: repoRoot,
         timeout: 5000,
       });
       return true;
     } catch {
       await execAsync(`git checkout HEAD -- "${filePath}"`, {
-        cwd: workspaceRoot,
+        cwd: repoRoot,
         timeout: 5000,
       });
       return true;

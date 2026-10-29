@@ -134,24 +134,22 @@ export class DiffPresenter {
     }
 
     // 2. АВТОМАТИЧЕСКОЕ ОТКРЫТИЕ ВКЛАДОК С ЗАЩИТОЙ ОТ ЛАВИНЫ:
-    // Если изменено больше 3 файлов разом (копирование/перемещение целой папки),
-    // НЕ открываем вкладки автоматически! Все файлы появятся в проводнике правок,
-    // но редактор не зависнет от открытия десятков окон.
-    const MAX_AUTO_OPEN_FILES = 3;
+    // Если изменено больше файлов, чем maxAutoOpenFiles, открываем только первые N файлов
+    // (по умолчанию 5), чтобы редактор не зависал при пакетных операциях или копировании папок.
+    const maxFiles = Math.max(1, config.maxAutoOpenFiles ?? 5);
 
     if (config.autoOpen) {
-      if (changes.length <= MAX_AUTO_OPEN_FILES) {
-        const targetColumn =
-          config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+      const filesToOpen = changes.slice(0, maxFiles);
+      const targetColumn =
+        config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
 
-        for (const change of changes) {
-          if (change.isDeleted) {
-            await this.openDiffTab(change, targetColumn);
-          } else if (config.openMode === 'diff' && !change.isUntracked) {
-            await this.openDiffTab(change, targetColumn);
-          } else {
-            await this.openDocumentTab(change, targetColumn);
-          }
+      for (const change of filesToOpen) {
+        if (change.isDeleted) {
+          await this.openDiffTab(change, targetColumn);
+        } else if (config.openMode === 'diff' && !change.isUntracked) {
+          await this.openDiffTab(change, targetColumn);
+        } else {
+          await this.openDocumentTab(change, targetColumn);
         }
       }
     }

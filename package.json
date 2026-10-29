@@ -2,7 +2,7 @@
   "name": "agent-change-inspector",
   "displayName": "Agent Change Inspector (AI Diff Guard)",
   "description": "Автоматически открывает файлы при изменении агентом/ИИ, показывает точные строки изменений, проводник правок, историю шагов и защищает проект",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "antigravity-tools",
   "repository": {
     "type": "git",
@@ -220,6 +220,11 @@
           "type": "boolean",
           "default": true,
           "description": "Включить мягкую подсветку измененных строк прямо в тексте открытого файла"
+        },
+        "agentDiff.maxAutoOpenFiles": {
+          "type": "number",
+          "default": 5,
+          "description": "Максимальное количество файлов, автоматически открываемых во вкладках при пакетных изменениях (защита от лавины окон)"
         },
         "agentDiff.autoArchive": {
           "type": "boolean",

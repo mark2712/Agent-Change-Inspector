@@ -143,6 +143,7 @@ export class SettingsWebviewPanel {
       autoOpen: cfg.get<boolean>('autoOpen', true),
       openMode: cfg.get<string>('openMode', 'diff'),
       jumpToFirstChange: cfg.get<boolean>('jumpToFirstChange', true),
+      maxAutoOpenFiles: cfg.get<number>('maxAutoOpenFiles', 5),
       showNotification: cfg.get<boolean>('showNotification', true),
       protectedPatterns: cfg.get<string[]>('protectedPatterns', []),
     };
@@ -336,7 +337,7 @@ export class SettingsWebviewPanel {
   <!-- БЛОК 1: ИСКЛЮЧЕНИЯ .agentignore -->
   <div class="card">
     <div class="card-title">
-      <span>📁 Правила исключений (<span style="color: var(--vscode-textLink-foreground)">.agentignore</span>)</span>
+      <span>📁 Правила исключений (<span style="color: var(--vscode-textLink-foreground)">.agent-inspector/.agentignore</span>)</span>
       <span id="rulesCount" style="font-size: 12px; opacity: 0.8">0 правил</span>
     </div>
     <div class="card-desc">
@@ -380,6 +381,14 @@ export class SettingsWebviewPanel {
         <option value="diff">Diff (Окно сравнения Git)</option>
         <option value="document">Обычный документ</option>
       </select>
+    </div>
+
+    <div class="setting-item">
+      <div class="setting-info">
+        <div class="setting-name">Лимит автоматически открываемых вкладок</div>
+        <div class="setting-desc">Защита от лавины: при одновременном изменении множества файлов откроются первые N</div>
+      </div>
+      <input type="number" id="maxOpenInput" min="1" max="20" style="width: 55px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); padding: 4px 6px; border-radius: 4px;" onchange="updateConfig('maxAutoOpenFiles', parseInt(this.value, 10))">
     </div>
 
     <div class="setting-item">
@@ -448,6 +457,7 @@ export class SettingsWebviewPanel {
       // 2. Настройки
       document.getElementById('autoOpenCheck').checked = !!state.autoOpen;
       document.getElementById('openModeSelect').value = state.openMode || 'diff';
+      document.getElementById('maxOpenInput').value = state.maxAutoOpenFiles || 5;
       document.getElementById('jumpCheck').checked = !!state.jumpToFirstChange;
       document.getElementById('notifyCheck').checked = !!state.showNotification;
 

@@ -49,6 +49,7 @@ export interface ExtensionConfig {
   openLocation: 'beside' | 'active';
   jumpToFirstChange: boolean;
   enableHighlight: boolean;
+  maxAutoOpenFiles: number;
   showNotification: boolean;
   treeViewMode: 'tree' | 'flat';
   autoArchive: boolean;

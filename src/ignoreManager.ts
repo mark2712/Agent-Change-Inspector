@@ -37,7 +37,7 @@ export class IgnoreManager implements vscode.Disposable {
   }
 
   /**
-   * Инициализация менеджера: поиск или создание .agentignore
+   * Инициализация менеджера: поиск или создание .agent-inspector/.agentignore
    */
   async init() {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -47,7 +47,34 @@ export class IgnoreManager implements vscode.Disposable {
     }
 
     const rootPath = workspaceFolder.uri.fsPath;
-    this.agentIgnorePath = path.join(rootPath, '.agentignore');
+    const inspectorDir = path.join(rootPath, '.agent-inspector');
+    this.agentIgnorePath = path.join(inspectorDir, '.agentignore');
+
+    // Гарантируем наличие папки .agent-inspector
+    try {
+      if (!fs.existsSync(inspectorDir)) {
+        fs.mkdirSync(inspectorDir, { recursive: true });
+      }
+      const gitignorePath = path.join(inspectorDir, '.gitignore');
+      if (!fs.existsSync(gitignorePath)) {
+        fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
+      }
+    } catch (err) {
+      console.error('Ошибка подготовки папки .agent-inspector:', err);
+    }
+
+    // Авто-миграция: если старый .agentignore лежал в корне — переносим в .agent-inspector
+    const legacyAgentIgnore = path.join(rootPath, '.agentignore');
+    try {
+      if (fs.existsSync(legacyAgentIgnore)) {
+        if (!fs.existsSync(this.agentIgnorePath)) {
+          await fs.promises.copyFile(legacyAgentIgnore, this.agentIgnorePath);
+        }
+        await fs.promises.unlink(legacyAgentIgnore).catch(() => {});
+      }
+    } catch (err) {
+      console.error('Ошибка миграции .agentignore в .agent-inspector:', err);
+    }
 
     // Если .agentignore не существует — собираем его из всех .gitignore проекта
     if (!fs.existsSync(this.agentIgnorePath)) {
@@ -56,9 +83,9 @@ export class IgnoreManager implements vscode.Disposable {
       await this.loadPatterns();
     }
 
-    // Следим за изменениями файла .agentignore
+    // Следим за изменениями файла .agent-inspector/.agentignore
     this.fileWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(workspaceFolder, '.agentignore')
+      new vscode.RelativePattern(workspaceFolder, '.agent-inspector/.agentignore')
     );
 
     this.disposables.push(
@@ -178,8 +205,13 @@ export class IgnoreManager implements vscode.Disposable {
       return false;
     }
 
-    // Всегда игнорируем сам .agentignore и .git
-    if (normalized === '.agentignore' || normalized.startsWith('.git/')) {
+    // Всегда игнорируем сам .agentignore, папку .agent-inspector и .git
+    if (
+      normalized === '.agentignore' ||
+      normalized.endsWith('/.agentignore') ||
+      normalized.startsWith('.git/') ||
+      normalized.startsWith('.agent-inspector/')
+    ) {
       return true;
     }
 
