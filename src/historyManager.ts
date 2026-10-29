@@ -34,9 +34,10 @@ export class HistoryManager implements vscode.Disposable {
 
   constructor(
     private readonly getConfig: () => ExtensionConfig,
-    private readonly workspaceRoot: string
+    private readonly workspaceRoot: string,
+    storageDir?: string
   ) {
-    this.snapshotManager = new SnapshotManager(workspaceRoot);
+    this.snapshotManager = new SnapshotManager(storageDir, workspaceRoot);
   }
 
   /**
@@ -67,7 +68,7 @@ export class HistoryManager implements vscode.Disposable {
     const config = this.getConfig();
 
     for (const change of changes) {
-      // Сохраняем исходное состояние файла в снэпшот шага
+      // Сохраняем исходное состояние файла в снэпшот шага (хранится вне проекта)
       await this.snapshotManager.saveFileSnapshot(
         this.activeTurnId,
         change.fsPath,

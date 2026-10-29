@@ -56,7 +56,8 @@ export function activate(context: vscode.Context) {
   const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
 
   const ignoreManager = new IgnoreManager();
-  const historyManager = new HistoryManager(getExtensionConfig, workspaceRoot);
+  const storageDir = context.storageUri ? context.storageUri.fsPath : undefined;
+  const historyManager = new HistoryManager(getExtensionConfig, workspaceRoot, storageDir);
   const presenter = new DiffPresenter(getExtensionConfig);
   const treeProvider = new AgentChangesTreeProvider(historyManager, config.treeViewMode);
 

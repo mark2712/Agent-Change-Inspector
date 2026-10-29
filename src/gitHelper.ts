@@ -5,6 +5,15 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
+// Расширения бинарных файлов, для которых diff не требуется
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.svgz',
+  '.pdf', '.zip', '.tar', '.gz', '.7z', '.rar',
+  '.exe', '.dll', '.bin', '.so', '.dylib',
+  '.woff', '.woff2', '.ttf', '.eot',
+  '.mp4', '.mov', '.mp3', '.wav',
+]);
+
 /**
  * Результат анализа изменений через git diff
  */
@@ -34,7 +43,7 @@ export async function isTrackedInGit(filePath: string, workspaceRoot: string): P
 }
 
 /**
- * Получить сводку изменений для конкретного файла через git diff -U0
+ * Получить сводку изменений для конкретного файла через git diff -U0 с защитой от больших/бинарных файлов
  */
 export async function getGitDiffSummary(
   filePath: string,
@@ -43,7 +52,40 @@ export async function getGitDiffSummary(
   try {
     const fileExistsOnDisk = fs.existsSync(filePath);
 
-    // 1. Проверяем статус в git porcelain с отключением подмодулей для максимальной скорости
+    // 1. Защита от больших файлов (> 3 МБ)
+    if (fileExistsOnDisk) {
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.size > 3 * 1024 * 1024) {
+          const sizeMb = (stat.size / (1024 * 1024)).toFixed(1);
+          return {
+            hasChanges: true,
+            isUntracked: false,
+            isDeleted: false,
+            addedLines: 0,
+            deletedLines: 0,
+            summaryText: `Большой файл (${sizeMb} МБ)`,
+          };
+        }
+      } catch {
+        // Игнорируем ошибку stat
+      }
+
+      // 2. Защита от бинарных файлов по расширению
+      const ext = path.extname(filePath).toLowerCase();
+      if (BINARY_EXTENSIONS.has(ext)) {
+        return {
+          hasChanges: true,
+          isUntracked: false,
+          isDeleted: false,
+          addedLines: 0,
+          deletedLines: 0,
+          summaryText: `Бинарный файл (${ext})`,
+        };
+      }
+    }
+
+    // 3. Проверяем статус в git porcelain с отключением подмодулей
     const { stdout: statusOut } = await execAsync(
       `git status --porcelain --ignore-submodules -- "${filePath}"`,
       {
@@ -54,7 +96,7 @@ export async function getGitDiffSummary(
 
     const statusTrim = (statusOut || '').trim();
 
-    // Если файл удален (статус 'D' или ' D' или физически отсутствует на диске)
+    // Если файл удален
     const isDeleted =
       statusTrim.startsWith('D') ||
       statusTrim.includes(' D') ||
@@ -85,7 +127,7 @@ export async function getGitDiffSummary(
       };
     }
 
-    // 2. Выполняем git diff с нулевым контекстом и без подмодулей
+    // 4. Выполняем git diff с нулевым контекстом и без подмодулей
     const { stdout } = await execAsync(
       `git diff -U0 --no-color --ignore-submodules -- "${filePath}"`,
       {
@@ -180,14 +222,12 @@ export async function revertGitFile(filePath: string, workspaceRoot: string): Pr
   try {
     const tracked = await isTrackedInGit(filePath, workspaceRoot);
     if (!tracked) {
-      // Если файл новый и не отслеживается — удаляем его с диска
       if (fs.existsSync(filePath)) {
         await fs.promises.unlink(filePath);
       }
       return true;
     }
 
-    // Если файл отслеживается (включая удаленный) — восстанавливаем его из Git
     try {
       await execAsync(`git restore -- "${filePath}"`, {
         cwd: workspaceRoot,

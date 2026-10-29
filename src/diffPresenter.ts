@@ -100,7 +100,7 @@ export class DiffPresenter {
   }
 
   /**
-   * Обработка пакета внешних изменений от агента
+   * Обработка пакета внешних изменений от агента с защитой от лавины вкладок
    */
   async presentChanges(changes: FileChangeInfo[]): Promise<void> {
     const config = this.getConfig();
@@ -111,7 +111,7 @@ export class DiffPresenter {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     const workspaceRoot = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
 
-    // 1. Проверяем защищенные файлы (только для них оставляем важное предупреждение)
+    // 1. Проверяем защищенные файлы
     const protectedChanges = changes.filter((c) => c.isProtected);
     if (protectedChanges.length > 0) {
       const names = protectedChanges.map((c) => c.relativeName).join(', ');
@@ -133,24 +133,27 @@ export class DiffPresenter {
         });
     }
 
-    // 2. АВТОМАТИЧЕСКОЕ ОТКРЫТИЕ ПОСТОЯННЫХ ВКЛАДОК
-    if (config.autoOpen) {
-      const targetColumn =
-        config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+    // 2. АВТОМАТИЧЕСКОЕ ОТКРЫТИЕ ВКЛАДОК С ЗАЩИТОЙ ОТ ЛАВИНЫ:
+    // Если изменено больше 3 файлов разом (копирование/перемещение целой папки),
+    // НЕ открываем вкладки автоматически! Все файлы появятся в проводнике правок,
+    // но редактор не зависнет от открытия десятков окон.
+    const MAX_AUTO_OPEN_FILES = 3;
 
-      // Открываем только существующие/измененные файлы (до 5 файлов)
-      for (const change of changes.slice(0, 5)) {
-        if (change.isDeleted) {
-          // Для удаленного файла открываем Diff истории удаления
-          await this.openDiffTab(change, targetColumn);
-        } else if (config.openMode === 'diff' && !change.isUntracked) {
-          await this.openDiffTab(change, targetColumn);
-        } else {
-          await this.openDocumentTab(change, targetColumn);
+    if (config.autoOpen) {
+      if (changes.length <= MAX_AUTO_OPEN_FILES) {
+        const targetColumn =
+          config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+
+        for (const change of changes) {
+          if (change.isDeleted) {
+            await this.openDiffTab(change, targetColumn);
+          } else if (config.openMode === 'diff' && !change.isUntracked) {
+            await this.openDiffTab(change, targetColumn);
+          } else {
+            await this.openDocumentTab(change, targetColumn);
+          }
         }
       }
     }
-
-    // Всплывающие уведомления полностью убраны по требованию пользователя
   }
 }

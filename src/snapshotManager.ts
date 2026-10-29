@@ -1,24 +1,36 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { TurnCheckpoint } from './types';
 import { revertGitFile } from './gitHelper';
 
 /**
  * Менеджер снимков (снэпшотов) для безопасного пошагового отката промптов
+ * Снимки хранятся во внешнем хранилище VS Code (storageUri) или временной папке ОС,
+ * полностью исключая загрязнение рабочей области и зацикливание наблюдателя.
  */
 export class SnapshotManager {
-  private baseDir: string | null = null;
+  private baseDir: string;
 
-  constructor(workspaceRoot?: string) {
-    if (workspaceRoot) {
-      this.baseDir = path.join(workspaceRoot, '.agent-inspector', 'snapshots');
-      this.ensureBaseDir();
+  constructor(storageDir?: string, workspaceRoot?: string) {
+    if (storageDir) {
+      this.baseDir = path.join(storageDir, 'agent-snapshots');
+    } else if (workspaceRoot) {
+      const safeWorkspaceName = path.basename(workspaceRoot).replace(/[^a-zA-Z0-9_-]/g, '_');
+      this.baseDir = path.join(os.tmpdir(), 'agent-inspector-snapshots', safeWorkspaceName);
+    } else {
+      this.baseDir = path.join(os.tmpdir(), 'agent-inspector-snapshots', 'default');
     }
+    this.ensureBaseDir();
   }
 
   private ensureBaseDir() {
-    if (this.baseDir && !fs.existsSync(this.baseDir)) {
-      fs.mkdirSync(this.baseDir, { recursive: true });
+    try {
+      if (!fs.existsSync(this.baseDir)) {
+        fs.mkdirSync(this.baseDir, { recursive: true });
+      }
+    } catch (err) {
+      console.error('Ошибка создания директории снимков:', err);
     }
   }
 
@@ -30,7 +42,7 @@ export class SnapshotManager {
     fsPath: string,
     workspaceRoot: string
   ): Promise<void> {
-    if (!this.baseDir || !fs.existsSync(fsPath)) {
+    if (!fs.existsSync(fsPath)) {
       return;
     }
 
@@ -57,7 +69,7 @@ export class SnapshotManager {
    */
   async restoreTurn(checkpoint: TurnCheckpoint, workspaceRoot: string): Promise<boolean> {
     try {
-      const turnDir = this.baseDir ? path.join(this.baseDir, checkpoint.id) : null;
+      const turnDir = path.join(this.baseDir, checkpoint.id);
 
       for (const file of checkpoint.files) {
         if (file.isUntracked && !file.isDeleted) {
@@ -69,18 +81,16 @@ export class SnapshotManager {
         }
 
         // Если есть сохраненный снимок — восстанавливаем из него
-        if (turnDir) {
-          const relPath = path.relative(workspaceRoot, file.fsPath);
-          const snapFile = path.join(turnDir, relPath);
+        const relPath = path.relative(workspaceRoot, file.fsPath);
+        const snapFile = path.join(turnDir, relPath);
 
-          if (fs.existsSync(snapFile)) {
-            const targetDir = path.dirname(file.fsPath);
-            if (!fs.existsSync(targetDir)) {
-              await fs.promises.mkdir(targetDir, { recursive: true });
-            }
-            await fs.promises.copyFile(snapFile, file.fsPath);
-            continue;
+        if (fs.existsSync(snapFile)) {
+          const targetDir = path.dirname(file.fsPath);
+          if (!fs.existsSync(targetDir)) {
+            await fs.promises.mkdir(targetDir, { recursive: true });
           }
+          await fs.promises.copyFile(snapFile, file.fsPath);
+          continue;
         }
 
         // Иначе восстанавливаем через Git
@@ -95,10 +105,10 @@ export class SnapshotManager {
   }
 
   /**
-   * Удаление старых снимков, оставляем только последние N шагов
+   * Удаление старых снимков, оставляем только активные шаги
    */
   async cleanupOldSnapshots(activeTurnIds: string[]): Promise<void> {
-    if (!this.baseDir || !fs.existsSync(this.baseDir)) {
+    if (!fs.existsSync(this.baseDir)) {
       return;
     }
 

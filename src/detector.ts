@@ -40,7 +40,7 @@ function matchesPattern(filePath: string, patterns: string[]): boolean {
 }
 
 /**
- * Детектор внешних изменений файлов
+ * Детектор внешних изменений файлов с защитой от рекурсивных циклов и лавинных событий
  */
 export class ChangeDetector implements vscode.Disposable {
   private disposables: vscode.Disposable[] = [];
@@ -97,6 +97,19 @@ export class ChangeDetector implements vscode.Disposable {
     }
 
     const fsPath = path.normalize(uri.fsPath);
+    const normalized = fsPath.replace(/\\/g, '/').toLowerCase();
+
+    // 0. ЖЕСТКАЯ БЕЗУСЛОВНАЯ ЗАЩИТА: моментально пресекаем зацикливание и сканирование служебных папок
+    if (
+      normalized.includes('/.git/') ||
+      normalized.endsWith('/.git') ||
+      normalized.includes('/node_modules/') ||
+      normalized.includes('/.agent-inspector/') ||
+      normalized.includes('/.vscode/')
+    ) {
+      return;
+    }
+
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     const rootPath = workspaceFolder ? workspaceFolder.uri.fsPath : process.cwd();
     const relPath = path.relative(rootPath, fsPath);
@@ -106,7 +119,7 @@ export class ChangeDetector implements vscode.Disposable {
       return;
     }
 
-    // 2. Проверяем список исключений из настроек (для обратной совместимости)
+    // 2. Проверяем список исключений из настроек
     if (matchesPattern(fsPath, config.ignorePatterns)) {
       return;
     }
@@ -134,11 +147,17 @@ export class ChangeDetector implements vscode.Disposable {
   }
 
   private async flushQueue() {
-    const entries = Array.from(this.pendingChanges.entries());
+    let entries = Array.from(this.pendingChanges.entries());
     this.pendingChanges.clear();
 
     if (entries.length === 0) {
       return;
+    }
+
+    // ЗАЩИТА ОТ ЛАВИННЫХ СОБЫТИЙ (массовое копирование / распаковка):
+    // Ограничиваем пакет до 50 файлов за итерацию, чтобы не спамить системными процессами
+    if (entries.length > 50) {
+      entries = entries.slice(0, 50);
     }
 
     const config = this.getConfig();
