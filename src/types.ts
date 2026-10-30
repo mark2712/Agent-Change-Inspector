@@ -32,6 +32,7 @@ export interface FileChangeInfo {
   isDeleted: boolean;
   isBinary?: boolean;
   isLarge?: boolean;
+  isUserSave?: boolean;
   hunks: DiffHunkRange[];
   snapshotPath?: string;
   oldRelativeName?: string;

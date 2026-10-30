@@ -136,8 +136,8 @@ export class DiffPresenter {
       return;
     }
 
-    // 1. Предупреждение о защищенных файлах
-    const protectedChanges = changes.filter((c) => c.isProtected);
+    // 1. Предупреждение о защищенных файлах (только для внешних изменений от агента)
+    const protectedChanges = changes.filter((c) => c.isProtected && !c.isUserSave);
     if (protectedChanges.length > 0) {
       const names = protectedChanges.map((c) => c.relativeName).join(', ');
       vscode.window
@@ -160,9 +160,12 @@ export class DiffPresenter {
 
     // 2. Автоматическое открытие вкладок:
     // Только если shouldAutoOpen === true (нет лавинного потока < 200 мс и размер пачки небольшой)
+    // И ИСКЛЮЧАЕМ файлы, которые были сохранены самим пользователем в VS Code (!c.isUserSave)
     if (config.autoOpen && shouldAutoOpen) {
       const maxFiles = Math.max(1, config.maxAutoOpenFiles ?? 3);
-      const filesToOpen = changes.filter((c) => !c.isBinary && !c.isLarge).slice(0, maxFiles);
+      const filesToOpen = changes
+        .filter((c) => !c.isBinary && !c.isLarge && !c.isUserSave)
+        .slice(0, maxFiles);
       const targetColumn =
         config.openLocation === 'beside' ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
 

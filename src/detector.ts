@@ -48,6 +48,7 @@ export class ChangeDetector implements vscode.Disposable {
   private disposables: vscode.Disposable[] = [];
   private pendingChanges = new Map<string, vscode.Uri>();
   private debounceTimer: NodeJS.Timeout | null = null;
+  private userSaveTimes = new Map<string, number>();
 
   // Защита от массового копирования / перемещения:
   // Если изменения сыплются с интервалом менее 200 мс — запрещаем авто-открытие вкладок
@@ -82,9 +83,15 @@ export class ChangeDetector implements vscode.Disposable {
       watcher
     );
 
-    // 2. Также слушаем сохранения внутри VS Code
+    // 2. Также слушаем сохранения внутри VS Code (Ctrl+S, меню Сохранить, автосохранение)
     this.disposables.push(
+      vscode.workspace.onWillSaveTextDocument((e) => {
+        const fsPath = path.normalize(e.document.fileName);
+        this.userSaveTimes.set(fsPath, Date.now());
+      }),
       vscode.workspace.onDidSaveTextDocument((doc) => {
+        const fsPath = path.normalize(doc.fileName);
+        this.userSaveTimes.set(fsPath, Date.now());
         this.handleFileEvent(doc.uri);
       })
     );
@@ -172,9 +179,13 @@ export class ChangeDetector implements vscode.Disposable {
 
     const changed: FileChangeInfo[] = [];
     const reverted: string[] = [];
+    const now = Date.now();
 
     for (const [fsPath] of entries) {
       const isProtected = matchesPattern(fsPath, config.protectedPatterns);
+      const lastUserSave = this.userSaveTimes.get(fsPath);
+      // Если файл был сохранен внутри VS Code менее 2.5 сек назад — это ручное сохранение пользователя
+      const isUserSave = !!lastUserSave && now - lastUserSave < 2500;
 
       // Вычисляем изменение через BaselineManager
       const change = await this.baselineManager.inspectFileChange(
@@ -184,12 +195,20 @@ export class ChangeDetector implements vscode.Disposable {
       );
 
       if (change) {
+        change.isUserSave = isUserSave;
         changed.push(change);
       } else {
         // Если изменений нет, но файл ранее был в списке правок — значит, был Ctrl+Z или откат
         if (this.isFileTracked(fsPath)) {
           reverted.push(fsPath);
         }
+      }
+    }
+
+    // Очищаем устаревший кэш сохранений пользователя (старше 5 секунд)
+    for (const [file, time] of this.userSaveTimes.entries()) {
+      if (now - time > 5000) {
+        this.userSaveTimes.delete(file);
       }
     }
 

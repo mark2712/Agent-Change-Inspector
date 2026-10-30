@@ -118,6 +118,7 @@ export class StorageManager {
           isDeleted: f.isDeleted,
           isBinary: f.isBinary,
           isLarge: f.isLarge,
+          isUserSave: f.isUserSave,
           snapshotPath: f.snapshotPath,
           oldRelativeName: f.oldRelativeName,
           hunks: f.hunks,
@@ -159,6 +160,7 @@ export class StorageManager {
           isDeleted: f.isDeleted,
           isBinary: f.isBinary,
           isLarge: f.isLarge,
+          isUserSave: f.isUserSave,
           snapshotPath: f.snapshotPath,
           oldRelativeName: f.oldRelativeName,
           hunks: f.hunks,
@@ -214,6 +216,7 @@ export class StorageManager {
             isDeleted: !!f.isDeleted,
             isBinary: !!f.isBinary,
             isLarge: !!f.isLarge,
+            isUserSave: !!f.isUserSave,
             snapshotPath:
               f.snapshotPath || this.getSnapshotFilePath(data.folderName || data.id, f.relPath),
             oldRelativeName: f.oldRelativeName,
